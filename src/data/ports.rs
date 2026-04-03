@@ -26,8 +26,86 @@ pub struct SystemPortScanner;
 
 impl PortScanner for SystemPortScanner {
     fn scan(&self) -> Result<Vec<PortEntry>> {
-        Ok(vec![]) // OS-specific impl in Task 11
+        platform::scan_ports()
     }
+}
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use std::process::Command;
+
+    pub fn scan_ports() -> Result<Vec<PortEntry>> {
+        let output = Command::new("lsof")
+            .args(["-iTCP", "-sTCP:LISTEN", "-P", "-n"])
+            .output()?;
+        if !output.status.success() { return Ok(vec![]); }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut entries = Vec::new();
+        for line in stdout.lines().skip(1) {
+            if let Some(entry) = parse_lsof_line(line) { entries.push(entry); }
+        }
+        Ok(entries)
+    }
+
+    fn parse_lsof_line(line: &str) -> Option<PortEntry> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 9 { return None; }
+        let process_name = parts[0].to_string();
+        let pid: u32 = parts[1].parse().ok()?;
+        let name_field = parts[8];
+        let port = name_field.rsplit(':').next()?.parse::<u16>().ok()?;
+        Some(PortEntry {
+            port, protocol: Protocol::Tcp,
+            address: name_field.rsplitn(2, ':').nth(1).unwrap_or("*").to_string(),
+            pid, process_name, command: String::new(), cpu_percent: 0.0, memory_bytes: 0,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use super::*;
+    use std::fs;
+
+    pub fn scan_ports() -> Result<Vec<PortEntry>> {
+        let content = fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+        let mut entries = Vec::new();
+        for line in content.lines().skip(1) {
+            if let Some(entry) = parse_proc_net_tcp_line(line) { entries.push(entry); }
+        }
+        Ok(entries)
+    }
+
+    fn parse_proc_net_tcp_line(line: &str) -> Option<PortEntry> {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 { return None; }
+        if parts[3] != "0A" { return None; }
+        let local_addr = parts[1];
+        let addr_parts: Vec<&str> = local_addr.split(':').collect();
+        if addr_parts.len() != 2 { return None; }
+        let port = u16::from_str_radix(addr_parts[1], 16).ok()?;
+        Some(PortEntry {
+            port, protocol: Protocol::Tcp,
+            address: format_hex_addr(addr_parts[0]),
+            pid: 0, process_name: String::new(), command: String::new(),
+            cpu_percent: 0.0, memory_bytes: 0,
+        })
+    }
+
+    fn format_hex_addr(hex: &str) -> String {
+        if hex.len() != 8 { return hex.to_string(); }
+        let bytes: Vec<u8> = (0..8).step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok()).collect();
+        if bytes.len() == 4 { format!("{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]) }
+        else { hex.to_string() }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+mod platform {
+    use super::*;
+    pub fn scan_ports() -> Result<Vec<PortEntry>> { Ok(vec![]) }
 }
 
 #[cfg(test)]
