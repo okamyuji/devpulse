@@ -14,6 +14,12 @@ pub struct FilterState {
     matcher: SkimMatcherV2,
 }
 
+impl std::fmt::Debug for FilterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilterState").field("query", &self.query).finish()
+    }
+}
+
 impl FilterState {
     pub fn new() -> Self {
         Self {
