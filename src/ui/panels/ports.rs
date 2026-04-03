@@ -33,7 +33,7 @@ impl<'a> Widget for PortsPanel<'a> {
             SortDirection::Asc => "▲",
             SortDirection::Desc => "▼",
         };
-        let sort_info = format!(" {} items  Sort: {}{} (</>:col S:dir) ", self.entries.len(), self.sort_column.label(), arrow);
+        let sort_info = format!(" {} items  Sort: {}{} (,/.:col S:dir) ", self.entries.len(), self.sort_column.label(), arrow);
         let block = Block::default()
             .title(title)
             .title_bottom(sort_info)

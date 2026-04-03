@@ -174,7 +174,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
         Panel::Ports => vec![
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
-            ("</>", "Sort Col"),
+            (",/.", "Sort"),
             ("S", "Sort Dir"),
         ],
         Panel::Docker => vec![
@@ -186,7 +186,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
             ("t", "Tree"),
-            ("</>", "Sort Col"),
+            (",/.", "Sort"),
             ("S", "Sort Dir"),
         ],
         Panel::Logs => vec![
@@ -380,11 +380,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             app.wrap_logs = !app.wrap_logs;
             true
         }
-        KeyCode::Char('>') | KeyCode::Char('.') => {
+        KeyCode::Char('.') => {
             app.sort_next();
             true
         }
-        KeyCode::Char('<') | KeyCode::Char(',') => {
+        KeyCode::Char(',') => {
             app.sort_prev();
             true
         }
