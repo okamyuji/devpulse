@@ -64,6 +64,14 @@ async fn main() -> anyhow::Result<()> {
         app.docker_available = false;
     }
 
+    // Set up panic hook to restore terminal
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        original_hook(panic_info);
+    }));
+
     // Initialize terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();

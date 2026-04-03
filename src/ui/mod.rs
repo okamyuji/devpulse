@@ -7,6 +7,9 @@ use ratatui::Frame;
 
 use crate::action::Action;
 use crate::app::{App, AppMode};
+use crate::data::docker::ContainerInfo;
+use crate::data::ports::PortEntry;
+use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
 use crate::ui::common::{ConfirmDialog, HelpOverlay};
 use crate::ui::layout::{compute_layout, LayoutMode};
@@ -20,12 +23,47 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let panel_areas = compute_layout(area, LayoutMode::Quad, app.fullscreen_panel);
     let filter_text = app.global_filter.query();
+    let filter_active = app.global_filter.is_active();
+
+    // Filter data when global filter is active
+    let filtered_ports: Vec<PortEntry> = if filter_active {
+        app.port_entries
+            .iter()
+            .filter(|e| {
+                app.global_filter.matches(&e.process_name)
+                    || app.global_filter.matches(&format!(":{}", e.port))
+            })
+            .cloned()
+            .collect()
+    } else {
+        app.port_entries.clone()
+    };
+
+    let filtered_containers: Vec<ContainerInfo> = if filter_active {
+        app.docker_containers
+            .iter()
+            .filter(|c| app.global_filter.matches(&c.name) || app.global_filter.matches(&c.image))
+            .cloned()
+            .collect()
+    } else {
+        app.docker_containers.clone()
+    };
+
+    let filtered_processes: Vec<ProcessInfo> = if filter_active {
+        app.process_list
+            .iter()
+            .filter(|p| app.global_filter.matches(&p.name) || app.global_filter.matches(&p.command))
+            .cloned()
+            .collect()
+    } else {
+        app.process_list.clone()
+    };
 
     // Ports panel
     let ports_area = panel_areas[Panel::Ports as usize];
     if ports_area.width > 0 && ports_area.height > 0 {
         let ports_panel = PortsPanel {
-            entries: &app.port_entries,
+            entries: &filtered_ports,
             selected: app.panel_states[Panel::Ports as usize].selected_index,
             filter_text,
             is_focused: app.active_panel == Panel::Ports,
@@ -37,7 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let docker_area = panel_areas[Panel::Docker as usize];
     if docker_area.width > 0 && docker_area.height > 0 {
         let docker_panel = DockerPanel {
-            containers: &app.docker_containers,
+            containers: &filtered_containers,
             selected: app.panel_states[Panel::Docker as usize].selected_index,
             filter_text,
             is_focused: app.active_panel == Panel::Docker,
@@ -50,11 +88,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let processes_area = panel_areas[Panel::Processes as usize];
     if processes_area.width > 0 && processes_area.height > 0 {
         let processes_panel = ProcessesPanel {
-            processes: &app.process_list,
+            processes: &filtered_processes,
             selected: app.panel_states[Panel::Processes as usize].selected_index,
             filter_text,
             is_focused: app.active_panel == Panel::Processes,
-            tree_mode: false,
+            tree_mode: app.tree_mode,
         };
         frame.render_widget(processes_panel, processes_area);
     }
@@ -67,8 +105,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             selected: app.panel_states[Panel::Logs as usize].selected_index,
             filter_text,
             is_focused: app.active_panel == Panel::Logs,
-            tail_follow: app.config.logs.tail_follow,
-            wrap: false,
+            tail_follow: app.tail_follow,
+            wrap: app.wrap_logs,
         };
         frame.render_widget(logs_panel, logs_area);
     }
@@ -164,8 +202,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             true
         }
         KeyCode::Char('K') => {
-            // Kill process
-            let force = key.modifiers.contains(KeyModifiers::SHIFT);
+            // K = SIGTERM, Ctrl+K = SIGKILL (force)
+            let force = key.modifiers.contains(KeyModifiers::CONTROL);
             match app.active_panel {
                 Panel::Ports => {
                     if let Some(pid) = app.selected_port_pid() {
@@ -209,6 +247,29 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             }
             true
         }
+        KeyCode::Char('D') => {
+            if app.active_panel == Panel::Docker {
+                if let Some(id) = app.selected_container_id() {
+                    let action = Action::RemoveContainer { id };
+                    app.confirm_message = action.description();
+                    app.pending_action = Some(action);
+                    app.mode = AppMode::Confirm;
+                }
+            }
+            true
+        }
+        KeyCode::Char('F') => {
+            app.tail_follow = !app.tail_follow;
+            true
+        }
+        KeyCode::Char('t') => {
+            app.tree_mode = !app.tree_mode;
+            true
+        }
+        KeyCode::Char('w') => {
+            app.wrap_logs = !app.wrap_logs;
+            true
+        }
         _ => false,
     }
 }
@@ -228,7 +289,9 @@ fn handle_global_filter_mode(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Backspace => {
             let query = app.global_filter.query().to_string();
             if !query.is_empty() {
-                let new_query = &query[..query.len() - 1];
+                let mut chars = query.chars();
+                chars.next_back();
+                let new_query = chars.as_str();
                 app.global_filter.set_query(new_query);
             }
             true
@@ -329,7 +392,21 @@ mod tests {
 
     #[test]
     fn test_handle_key_navigation() {
+        use crate::data::ports::{PortEntry, Protocol};
         let mut app = App::new(Config::default());
+        // Add fake data so selection movement works
+        for i in 0..5 {
+            app.port_entries.push(PortEntry {
+                port: 3000 + i,
+                protocol: Protocol::Tcp,
+                address: "127.0.0.1".into(),
+                pid: 100 + i as u32,
+                process_name: "test".into(),
+                command: "test".into(),
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+            });
+        }
         handle_key(&mut app, make_key(KeyCode::Tab));
         assert!(matches!(app.active_panel, Panel::Docker));
         handle_key(&mut app, make_key(KeyCode::BackTab));

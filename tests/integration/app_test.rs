@@ -62,7 +62,21 @@ fn test_fullscreen_toggle_with_panel_switch() {
 
 #[test]
 fn test_selection_movement() {
+    use devpulse::data::ports::{PortEntry, Protocol};
     let mut app = App::new(Config::default());
+    // Add fake data so selection movement works
+    for i in 0..10 {
+        app.port_entries.push(PortEntry {
+            port: 3000 + i,
+            protocol: Protocol::Tcp,
+            address: "127.0.0.1".into(),
+            pid: 100 + i as u32,
+            process_name: "test".into(),
+            command: "test".into(),
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+        });
+    }
     app.move_selection_down();
     app.move_selection_down();
     app.move_selection_down();

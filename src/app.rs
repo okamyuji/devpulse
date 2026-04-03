@@ -58,7 +58,12 @@ pub struct App {
     // Actions
     pub pending_action: Option<Action>,
     pub confirm_message: String,
+    // Toggle states
+    pub tail_follow: bool,
+    pub wrap_logs: bool,
+    pub tree_mode: bool,
     // Internal data sources
+    sys: sysinfo::System,
     #[cfg(not(test))]
     docker_source: BollardDockerSource,
 }
@@ -69,13 +74,14 @@ impl std::fmt::Debug for App {
             .field("active_panel", &self.active_panel)
             .field("mode", &self.mode)
             .field("should_quit", &self.should_quit)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl App {
     pub fn new(config: Config) -> Self {
         let log_capacity = config.logs.buffer_lines;
+        let tail_follow = config.logs.tail_follow;
         #[cfg(not(test))]
         let docker_source = BollardDockerSource::new();
         #[cfg(not(test))]
@@ -103,6 +109,10 @@ impl App {
             docker_available,
             pending_action: None,
             confirm_message: String::new(),
+            tail_follow,
+            wrap_logs: false,
+            tree_mode: false,
+            sys: sysinfo::System::new(),
             #[cfg(not(test))]
             docker_source,
         }
@@ -141,9 +151,20 @@ impl App {
     pub fn quit(&mut self) {
         self.should_quit = true;
     }
+    pub fn active_panel_data_len(&self) -> usize {
+        match self.active_panel {
+            Panel::Ports => self.port_entries.len(),
+            Panel::Docker => self.docker_containers.len(),
+            Panel::Processes => self.process_list.len(),
+            Panel::Logs => self.log_buffer.len(),
+        }
+    }
     pub fn move_selection_down(&mut self) {
+        let max = self.active_panel_data_len().saturating_sub(1);
         let state = &mut self.panel_states[self.active_panel as usize];
-        state.selected_index = state.selected_index.saturating_add(1);
+        if state.selected_index < max {
+            state.selected_index += 1;
+        }
     }
     pub fn move_selection_up(&mut self) {
         let state = &mut self.panel_states[self.active_panel as usize];
@@ -158,11 +179,12 @@ impl App {
             self.port_entries = entries;
         }
 
-        // Scan processes via sysinfo
-        let mut sys = sysinfo::System::new();
-        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        // Scan processes via sysinfo (reuse self.sys so CPU deltas are computed)
+        self.sys
+            .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let dev_priority = self.config.processes.dev_process_priority;
-        let mut processes: Vec<ProcessInfo> = sys
+        let mut processes: Vec<ProcessInfo> = self
+            .sys
             .processes()
             .values()
             .map(|p| {
@@ -206,6 +228,24 @@ impl App {
             });
         }
         self.process_list = processes;
+
+        self.clamp_selections();
+    }
+
+    pub fn clamp_selections(&mut self) {
+        let lengths = [
+            self.port_entries.len(),
+            self.docker_containers.len(),
+            self.process_list.len(),
+            self.log_buffer.len(),
+        ];
+        for (i, &len) in lengths.iter().enumerate() {
+            if len == 0 {
+                self.panel_states[i].selected_index = 0;
+            } else if self.panel_states[i].selected_index >= len {
+                self.panel_states[i].selected_index = len - 1;
+            }
+        }
     }
 
     /// Fetch Docker containers (async, call from tokio context)
@@ -334,6 +374,20 @@ mod tests {
     #[test]
     fn test_move_selection() {
         let mut app = test_app();
+        // Add some fake port entries so movement is allowed
+        use crate::data::ports::{PortEntry, Protocol};
+        for i in 0..5 {
+            app.port_entries.push(PortEntry {
+                port: 3000 + i,
+                protocol: Protocol::Tcp,
+                address: "127.0.0.1".into(),
+                pid: 100 + i as u32,
+                process_name: "test".into(),
+                command: "test".into(),
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+            });
+        }
         app.move_selection_down();
         assert_eq!(app.panel_states[0].selected_index, 1);
         app.move_selection_down();
@@ -345,6 +399,12 @@ mod tests {
     fn test_selection_no_underflow() {
         let mut app = test_app();
         app.move_selection_up();
+        assert_eq!(app.panel_states[0].selected_index, 0);
+    }
+    #[test]
+    fn test_selection_no_overflow_on_empty() {
+        let mut app = test_app();
+        app.move_selection_down();
         assert_eq!(app.panel_states[0].selected_index, 0);
     }
     #[test]
