@@ -69,6 +69,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             selected: app.panel_states[Panel::Ports as usize].selected_index,
             filter_text,
             is_focused: app.active_panel == Panel::Ports,
+            sort_column: app.port_sort,
+            sort_direction: app.port_sort_dir,
         };
         frame.render_widget(ports_panel, ports_area);
     }
@@ -95,6 +97,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             filter_text,
             is_focused: app.active_panel == Panel::Processes,
             tree_mode: app.tree_mode,
+            sort_column: app.process_sort,
+            sort_direction: app.process_sort_dir,
         };
         frame.render_widget(processes_panel, processes_area);
     }
@@ -170,6 +174,8 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
         Panel::Ports => vec![
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
+            ("</>", "Sort Col"),
+            ("S", "Sort Dir"),
         ],
         Panel::Docker => vec![
             ("s", "Stop"),
@@ -180,6 +186,8 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
             ("t", "Tree"),
+            ("</>", "Sort Col"),
+            ("S", "Sort Dir"),
         ],
         Panel::Logs => vec![
             ("F", "Follow"),
@@ -370,6 +378,18 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('w') => {
             app.wrap_logs = !app.wrap_logs;
+            true
+        }
+        KeyCode::Char('>') | KeyCode::Char('.') => {
+            app.sort_next();
+            true
+        }
+        KeyCode::Char('<') | KeyCode::Char(',') => {
+            app.sort_prev();
+            true
+        }
+        KeyCode::Char('S') => {
+            app.sort_toggle_direction();
             true
         }
         _ => false,

@@ -1,3 +1,4 @@
+use crate::app::{ProcessSortColumn, SortDirection};
 use crate::data::processes::ProcessInfo;
 use crate::ui::common::format_bytes;
 use ratatui::{
@@ -13,6 +14,8 @@ pub struct ProcessesPanel<'a> {
     pub filter_text: &'a str,
     pub is_focused: bool,
     pub tree_mode: bool,
+    pub sort_column: ProcessSortColumn,
+    pub sort_direction: SortDirection,
 }
 
 impl<'a> Widget for ProcessesPanel<'a> {
@@ -27,13 +30,36 @@ impl<'a> Widget for ProcessesPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let count_text = format!(" {} items ", self.processes.len());
+        let arrow = match self.sort_direction {
+            SortDirection::Asc => "▲",
+            SortDirection::Desc => "▼",
+        };
+        let sort_info = format!(" {} items  Sort: {}{} (</>:col S:dir) ", self.processes.len(), self.sort_column.label(), arrow);
+        let count_text = sort_info;
         let block = Block::default()
             .title(title)
             .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
-        let header = Row::new(vec!["PID", "NAME", "CPU%", "MEM", "PORTS", "CMD"])
+        let header_cols: Vec<String> = ["PID", "NAME", "CPU%", "MEM", "PORTS", "CMD"]
+            .iter()
+            .map(|&col| {
+                let sort_col = match col {
+                    "PID" => Some(ProcessSortColumn::Pid),
+                    "NAME" => Some(ProcessSortColumn::Name),
+                    "CPU%" => Some(ProcessSortColumn::Cpu),
+                    "MEM" => Some(ProcessSortColumn::Memory),
+                    "PORTS" => Some(ProcessSortColumn::Ports),
+                    _ => None,
+                };
+                if sort_col == Some(self.sort_column) {
+                    format!("{}{}", col, arrow)
+                } else {
+                    col.to_string()
+                }
+            })
+            .collect();
+        let header = Row::new(header_cols)
             .style(Style::default().add_modifier(Modifier::BOLD));
         let rows: Vec<Row> = self
             .processes
@@ -102,6 +128,8 @@ mod tests {
             filter_text: "",
             is_focused: true,
             tree_mode: false,
+            sort_column: ProcessSortColumn::Cpu,
+            sort_direction: SortDirection::Desc,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
         p.render(Rect::new(0, 0, 80, 10), &mut buf);

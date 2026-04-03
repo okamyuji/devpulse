@@ -5,7 +5,7 @@ use crate::data::docker::ContainerInfo;
 use crate::data::docker::{BollardDockerSource, DockerSource};
 use crate::data::logs::LogBuffer;
 use crate::data::ports::{PortEntry, SystemPortScanner};
-use crate::data::processes::{is_dev_process, ProcessInfo};
+use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
 use crate::filter::FilterState;
 
@@ -16,6 +16,86 @@ pub enum AppMode {
     LocalFilter,
     Confirm,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProcessSortColumn {
+    Pid,
+    Name,
+    Cpu,
+    Memory,
+    Ports,
+}
+
+impl ProcessSortColumn {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pid => Self::Name,
+            Self::Name => Self::Cpu,
+            Self::Cpu => Self::Memory,
+            Self::Memory => Self::Ports,
+            Self::Ports => Self::Pid,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Pid => Self::Ports,
+            Self::Name => Self::Pid,
+            Self::Cpu => Self::Name,
+            Self::Memory => Self::Cpu,
+            Self::Ports => Self::Memory,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pid => "PID",
+            Self::Name => "NAME",
+            Self::Cpu => "CPU%",
+            Self::Memory => "MEM",
+            Self::Ports => "PORTS",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PortSortColumn {
+    Port,
+    Process,
+    Cpu,
+    Memory,
+}
+
+impl PortSortColumn {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Port => Self::Process,
+            Self::Process => Self::Cpu,
+            Self::Cpu => Self::Memory,
+            Self::Memory => Self::Port,
+        }
+    }
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Port => Self::Memory,
+            Self::Process => Self::Port,
+            Self::Cpu => Self::Process,
+            Self::Memory => Self::Cpu,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Port => "PORT",
+            Self::Process => "PROCESS",
+            Self::Cpu => "CPU%",
+            Self::Memory => "MEM",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
 }
 
 #[derive(Debug)]
@@ -62,6 +142,11 @@ pub struct App {
     pub tail_follow: bool,
     pub wrap_logs: bool,
     pub tree_mode: bool,
+    // Sort states
+    pub process_sort: ProcessSortColumn,
+    pub process_sort_dir: SortDirection,
+    pub port_sort: PortSortColumn,
+    pub port_sort_dir: SortDirection,
     // Internal data sources
     sys: sysinfo::System,
     #[cfg(not(test))]
@@ -112,6 +197,10 @@ impl App {
             tail_follow,
             wrap_logs: false,
             tree_mode: false,
+            process_sort: ProcessSortColumn::Cpu,
+            process_sort_dir: SortDirection::Desc,
+            port_sort: PortSortColumn::Port,
+            port_sort_dir: SortDirection::Asc,
             sys: sysinfo::System::new(),
             #[cfg(not(test))]
             docker_source,
@@ -171,6 +260,90 @@ impl App {
         state.selected_index = state.selected_index.saturating_sub(1);
     }
 
+    /// Cycle sort column forward (`>` key)
+    pub fn sort_next(&mut self) {
+        match self.active_panel {
+            Panel::Processes => self.process_sort = self.process_sort.next(),
+            Panel::Ports => self.port_sort = self.port_sort.next(),
+            _ => {}
+        }
+        self.apply_sort();
+    }
+
+    /// Cycle sort column backward (`<` key)
+    pub fn sort_prev(&mut self) {
+        match self.active_panel {
+            Panel::Processes => self.process_sort = self.process_sort.prev(),
+            Panel::Ports => self.port_sort = self.port_sort.prev(),
+            _ => {}
+        }
+        self.apply_sort();
+    }
+
+    /// Toggle sort direction (asc/desc) for current panel
+    pub fn sort_toggle_direction(&mut self) {
+        match self.active_panel {
+            Panel::Processes => {
+                self.process_sort_dir = match self.process_sort_dir {
+                    SortDirection::Asc => SortDirection::Desc,
+                    SortDirection::Desc => SortDirection::Asc,
+                };
+            }
+            Panel::Ports => {
+                self.port_sort_dir = match self.port_sort_dir {
+                    SortDirection::Asc => SortDirection::Desc,
+                    SortDirection::Desc => SortDirection::Asc,
+                };
+            }
+            _ => {}
+        }
+        self.apply_sort();
+    }
+
+    /// Apply current sort settings to data
+    pub fn apply_sort(&mut self) {
+        // Sort processes
+        let pcol = self.process_sort;
+        let pdir = self.process_sort_dir;
+        self.process_list.sort_by(|a, b| {
+            let ord = match pcol {
+                ProcessSortColumn::Pid => a.pid.cmp(&b.pid),
+                ProcessSortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                ProcessSortColumn::Cpu => a
+                    .cpu_percent
+                    .partial_cmp(&b.cpu_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                ProcessSortColumn::Memory => a.memory_bytes.cmp(&b.memory_bytes),
+                ProcessSortColumn::Ports => a.listening_ports.len().cmp(&b.listening_ports.len()),
+            };
+            match pdir {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            }
+        });
+
+        // Sort ports
+        let scol = self.port_sort;
+        let sdir = self.port_sort_dir;
+        self.port_entries.sort_by(|a, b| {
+            let ord = match scol {
+                PortSortColumn::Port => a.port.cmp(&b.port),
+                PortSortColumn::Process => {
+                    a.process_name.to_lowercase().cmp(&b.process_name.to_lowercase())
+                }
+                PortSortColumn::Cpu => a
+                    .cpu_percent
+                    .partial_cmp(&b.cpu_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                PortSortColumn::Memory => a.memory_bytes.cmp(&b.memory_bytes),
+            };
+            match sdir {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            }
+        });
+    }
+
     /// Refresh live data from system sources (ports, processes, docker)
     pub fn tick(&mut self) {
         // Scan ports
@@ -182,8 +355,7 @@ impl App {
         // Scan processes via sysinfo (reuse self.sys so CPU deltas are computed)
         self.sys
             .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let dev_priority = self.config.processes.dev_process_priority;
-        let mut processes: Vec<ProcessInfo> = self
+        let processes: Vec<ProcessInfo> = self
             .sys
             .processes()
             .values()
@@ -210,24 +382,10 @@ impl App {
             })
             .collect();
 
-        if dev_priority {
-            processes.sort_by(|a, b| {
-                let a_dev = is_dev_process(&a.name);
-                let b_dev = is_dev_process(&b.name);
-                b_dev.cmp(&a_dev).then_with(|| {
-                    b.cpu_percent
-                        .partial_cmp(&a.cpu_percent)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-            });
-        } else {
-            processes.sort_by(|a, b| {
-                b.cpu_percent
-                    .partial_cmp(&a.cpu_percent)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
         self.process_list = processes;
+
+        // Apply user-selected sort
+        self.apply_sort();
 
         self.clamp_selections();
     }

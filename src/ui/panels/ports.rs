@@ -1,3 +1,4 @@
+use crate::app::{PortSortColumn, SortDirection};
 use crate::data::ports::{PortEntry, Protocol};
 use crate::ui::common::format_bytes;
 use ratatui::{
@@ -12,6 +13,8 @@ pub struct PortsPanel<'a> {
     pub selected: usize,
     pub filter_text: &'a str,
     pub is_focused: bool,
+    pub sort_column: PortSortColumn,
+    pub sort_direction: SortDirection,
 }
 
 impl<'a> Widget for PortsPanel<'a> {
@@ -26,13 +29,34 @@ impl<'a> Widget for PortsPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let count_text = format!(" {} items ", self.entries.len());
+        let arrow = match self.sort_direction {
+            SortDirection::Asc => "▲",
+            SortDirection::Desc => "▼",
+        };
+        let sort_info = format!(" {} items  Sort: {}{} (</>:col S:dir) ", self.entries.len(), self.sort_column.label(), arrow);
         let block = Block::default()
             .title(title)
-            .title_bottom(count_text)
+            .title_bottom(sort_info)
             .borders(Borders::ALL)
             .border_style(border_style);
-        let header = Row::new(vec!["PORT", "PROTO", "PROCESS", "PID", "CPU%", "MEM"])
+        let header_cols: Vec<String> = ["PORT", "PROTO", "PROCESS", "PID", "CPU%", "MEM"]
+            .iter()
+            .map(|&col| {
+                let sort_col = match col {
+                    "PORT" => Some(PortSortColumn::Port),
+                    "PROCESS" => Some(PortSortColumn::Process),
+                    "CPU%" => Some(PortSortColumn::Cpu),
+                    "MEM" => Some(PortSortColumn::Memory),
+                    _ => None,
+                };
+                if sort_col == Some(self.sort_column) {
+                    format!("{}{}", col, arrow)
+                } else {
+                    col.to_string()
+                }
+            })
+            .collect();
+        let header = Row::new(header_cols)
             .style(Style::default().add_modifier(Modifier::BOLD));
         let rows: Vec<Row> = self
             .entries
@@ -98,6 +122,8 @@ mod tests {
             selected: 0,
             filter_text: "",
             is_focused: true,
+            sort_column: PortSortColumn::Port,
+            sort_direction: SortDirection::Asc,
         };
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
@@ -111,6 +137,8 @@ mod tests {
             selected: 0,
             filter_text: "node",
             is_focused: true,
+            sort_column: PortSortColumn::Cpu,
+            sort_direction: SortDirection::Desc,
         };
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
