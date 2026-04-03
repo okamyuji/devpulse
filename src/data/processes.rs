@@ -20,9 +20,8 @@ pub trait ProcessSource: Send + Sync {
 }
 
 const DEV_PROCESSES: &[&str] = &[
-    "node", "python", "python3", "java", "go", "cargo", "rustc",
-    "ruby", "php", "docker", "npm", "yarn", "pnpm", "bun", "deno",
-    "gradle", "mvn", "dotnet", "mix", "elixir",
+    "node", "python", "python3", "java", "go", "cargo", "rustc", "ruby", "php", "docker", "npm",
+    "yarn", "pnpm", "bun", "deno", "gradle", "mvn", "dotnet", "mix", "elixir",
 ];
 
 pub fn is_dev_process(name: &str) -> bool {
@@ -34,18 +33,31 @@ pub fn is_dev_process(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    struct MockProcessSource { processes: Vec<ProcessInfo> }
+    struct MockProcessSource {
+        processes: Vec<ProcessInfo>,
+    }
     impl ProcessSource for MockProcessSource {
-        fn list_processes(&self) -> Result<Vec<ProcessInfo>> { Ok(self.processes.clone()) }
-        fn kill_process(&self, _pid: u32, _force: bool) -> Result<()> { Ok(()) }
+        fn list_processes(&self) -> Result<Vec<ProcessInfo>> {
+            Ok(self.processes.clone())
+        }
+        fn kill_process(&self, _pid: u32, _force: bool) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
     fn test_process_info_fields() {
         let proc = ProcessInfo {
-            pid: 1234, name: "node".into(), command: "node server.js".into(),
-            user: "yuji".into(), cpu_percent: 12.5, memory_bytes: 340_000_000,
-            threads: 8, parent_pid: Some(1), listening_ports: vec![3000, 3001], start_time: 1700000000,
+            pid: 1234,
+            name: "node".into(),
+            command: "node server.js".into(),
+            user: "yuji".into(),
+            cpu_percent: 12.5,
+            memory_bytes: 340_000_000,
+            threads: 8,
+            parent_pid: Some(1),
+            listening_ports: vec![3000, 3001],
+            start_time: 1700000000,
         };
         assert_eq!(proc.pid, 1234);
         assert_eq!(proc.listening_ports.len(), 2);
