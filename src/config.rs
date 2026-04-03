@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub general: GeneralConfig,
@@ -54,52 +54,56 @@ pub struct ThemeConfig {
     pub name: String,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            ports: PortsConfig::default(),
-            docker: DockerConfig::default(),
-            processes: ProcessesConfig::default(),
-            logs: LogsConfig::default(),
-            theme: ThemeConfig::default(),
-        }
-    }
-}
-
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { refresh_rate_ms: 2000, default_layout: "quad".to_string(), confirm_destructive: true }
+        Self {
+            refresh_rate_ms: 2000,
+            default_layout: "quad".to_string(),
+            confirm_destructive: true,
+        }
     }
 }
 
 impl Default for PortsConfig {
     fn default() -> Self {
-        Self { sort_by: "port".to_string() }
+        Self {
+            sort_by: "port".to_string(),
+        }
     }
 }
 
 impl Default for DockerConfig {
     fn default() -> Self {
-        Self { socket_path: "auto".to_string(), show_stopped: true }
+        Self {
+            socket_path: "auto".to_string(),
+            show_stopped: true,
+        }
     }
 }
 
 impl Default for ProcessesConfig {
     fn default() -> Self {
-        Self { default_view: "flat".to_string(), dev_process_priority: true }
+        Self {
+            default_view: "flat".to_string(),
+            dev_process_priority: true,
+        }
     }
 }
 
 impl Default for LogsConfig {
     fn default() -> Self {
-        Self { buffer_lines: 10000, tail_follow: true }
+        Self {
+            buffer_lines: 10000,
+            tail_follow: true,
+        }
     }
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
-        Self { name: "dark".to_string() }
+        Self {
+            name: "dark".to_string(),
+        }
     }
 }
 

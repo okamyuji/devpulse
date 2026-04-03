@@ -10,13 +10,29 @@ pub enum Panel {
 
 impl Panel {
     pub fn next(self) -> Self {
-        match self { Self::Ports => Self::Docker, Self::Docker => Self::Processes, Self::Processes => Self::Logs, Self::Logs => Self::Ports }
+        match self {
+            Self::Ports => Self::Docker,
+            Self::Docker => Self::Processes,
+            Self::Processes => Self::Logs,
+            Self::Logs => Self::Ports,
+        }
     }
     pub fn prev(self) -> Self {
-        match self { Self::Ports => Self::Logs, Self::Docker => Self::Ports, Self::Processes => Self::Docker, Self::Logs => Self::Processes }
+        match self {
+            Self::Ports => Self::Logs,
+            Self::Docker => Self::Ports,
+            Self::Processes => Self::Docker,
+            Self::Logs => Self::Processes,
+        }
     }
     pub fn from_index(i: usize) -> Option<Self> {
-        match i { 0 => Some(Self::Ports), 1 => Some(Self::Docker), 2 => Some(Self::Processes), 3 => Some(Self::Logs), _ => None }
+        match i {
+            0 => Some(Self::Ports),
+            1 => Some(Self::Docker),
+            2 => Some(Self::Processes),
+            3 => Some(Self::Logs),
+            _ => None,
+        }
     }
 }
 

@@ -16,7 +16,15 @@ pub struct FilterState {
 
 impl std::fmt::Debug for FilterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FilterState").field("query", &self.query).finish()
+        f.debug_struct("FilterState")
+            .field("query", &self.query)
+            .finish()
+    }
+}
+
+impl Default for FilterState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
