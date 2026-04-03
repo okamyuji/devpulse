@@ -39,7 +39,8 @@ name = "light"
 
 #[test]
 fn test_load_nonexistent_file_returns_default() {
-    let config = devpulse::config::Config::load(std::path::Path::new("/nonexistent/config.toml")).unwrap();
+    let config =
+        devpulse::config::Config::load(std::path::Path::new("/nonexistent/config.toml")).unwrap();
     assert_eq!(config.general.refresh_rate_ms, 2000);
 }
 
