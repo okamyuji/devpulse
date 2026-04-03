@@ -56,10 +56,7 @@ fn bench_memory_usage() {
 
     // Measure before App creation
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let mem_before = sys
-        .process(my_pid)
-        .map(|p| p.memory())
-        .unwrap_or(0);
+    let mem_before = sys.process(my_pid).map(|p| p.memory()).unwrap_or(0);
 
     // Create app and run several ticks
     let mut app = App::new(Config::default());
@@ -70,10 +67,7 @@ fn bench_memory_usage() {
 
     // Measure after
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let mem_after = sys
-        .process(my_pid)
-        .map(|p| p.memory())
-        .unwrap_or(0);
+    let mem_after = sys.process(my_pid).map(|p| p.memory()).unwrap_or(0);
 
     let mem_delta_mb = (mem_after.saturating_sub(mem_before)) as f64 / 1_000_000.0;
 
@@ -106,9 +100,7 @@ fn bench_render_overhead() {
     let iterations = 100;
     let start = Instant::now();
     for _ in 0..iterations {
-        terminal
-            .draw(|f| devpulse::ui::draw(f, &app))
-            .unwrap();
+        terminal.draw(|f| devpulse::ui::draw(f, &app)).unwrap();
     }
     let elapsed = start.elapsed();
     let per_render = elapsed / iterations;
@@ -127,10 +119,7 @@ fn bench_render_overhead() {
     if per_render < Duration::from_millis(5) {
         println!("PASS: render is fast ({:?} < 5ms)", per_render);
     } else {
-        println!(
-            "WARN: render is moderate ({:?} >= 5ms)",
-            per_render
-        );
+        println!("WARN: render is moderate ({:?} >= 5ms)", per_render);
     }
 }
 

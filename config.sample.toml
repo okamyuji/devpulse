@@ -1,0 +1,48 @@
+# DevPulse Configuration
+# Default path: ~/.config/devpulse/config.toml
+
+[general]
+refresh_rate_ms = 2000         # データ更新間隔 (1000-30000)
+default_layout = "quad"        # "quad" | "main-side"
+confirm_destructive = true     # false にすると確認ダイアログをスキップ
+
+[ports]
+sort_by = "port"               # "port" | "pid" | "cpu" | "memory" | "process"
+
+[docker]
+socket_path = "auto"           # "auto" | "/var/run/docker.sock" 等
+show_stopped = true            # 停止済みコンテナも表示
+
+[processes]
+default_view = "flat"          # "flat" | "tree"
+dev_process_priority = true    # 開発系プロセスを上位にソート
+
+[logs]
+buffer_lines = 10000           # メモリ内保持行数 (最大)
+tail_follow = true             # 起動時のテール追従デフォルト
+
+# --- ログソース設定 ---
+# sources を省略するとデフォルトで Docker 全コンテナのログを収集します。
+# 複数ソースを組み合わせ可能です。
+
+# Docker コンテナログ (bollard API ストリーミング)
+[[logs.sources]]
+type = "docker"
+containers = "all"             # "all" | カンマ区切りのコンテナID/名前
+
+# ファイルログ (glob パターン対応、notify で変更検知)
+# [[logs.sources]]
+# type = "file"
+# path = "/var/log/app/*.log"
+
+# 複数ファイルソースの例:
+# [[logs.sources]]
+# type = "file"
+# path = "/tmp/myapp/server.log"
+#
+# [[logs.sources]]
+# type = "file"
+# path = "/tmp/myapp/worker*.log"
+
+[theme]
+name = "dark"                  # "dark" | "light"

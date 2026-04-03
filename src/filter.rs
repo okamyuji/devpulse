@@ -71,4 +71,85 @@ impl FilterState {
     pub fn query(&self) -> &str {
         &self.query
     }
+
+    /// AND条件マッチング: クエリを半角/全角スペースで分割し、
+    /// 全トークンがテキスト(source+message連結)にマッチする場合のみtrue。
+    /// クエリが空の場合は常にtrue。
+    pub fn matches_all_terms(&self, text: &str) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        // Split on half-width and full-width spaces
+        let terms: Vec<&str> = self
+            .query
+            .split([' ', '\u{3000}'])
+            .filter(|s| !s.is_empty())
+            .collect();
+        if terms.is_empty() {
+            return true;
+        }
+        let text_lower = text.to_lowercase();
+        terms
+            .iter()
+            .all(|term| text_lower.contains(&term.to_lowercase()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_matches_all_terms_empty_query() {
+        let f = FilterState::new();
+        assert!(f.matches_all_terms("anything"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_single_term() {
+        let mut f = FilterState::new();
+        f.set_query("error");
+        assert!(f.matches_all_terms("[app-web] connection error occurred"));
+        assert!(!f.matches_all_terms("[app-web] request ok"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_and_condition_halfwidth() {
+        let mut f = FilterState::new();
+        f.set_query("app error");
+        assert!(f.matches_all_terms("[app-web] connection error"));
+        assert!(!f.matches_all_terms("[db] connection error"));
+        assert!(!f.matches_all_terms("[app-web] request ok"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_and_condition_fullwidth() {
+        let mut f = FilterState::new();
+        f.set_query("app\u{3000}error");
+        assert!(f.matches_all_terms("[app-web] connection error"));
+        assert!(!f.matches_all_terms("[db] connection error"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_case_insensitive() {
+        let mut f = FilterState::new();
+        f.set_query("ERROR App");
+        assert!(f.matches_all_terms("[app-web] connection Error occurred"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_only_spaces() {
+        let mut f = FilterState::new();
+        f.set_query("   ");
+        assert!(f.matches_all_terms("anything"));
+    }
+
+    #[test]
+    fn test_matches_all_terms_mixed_spaces() {
+        let mut f = FilterState::new();
+        f.set_query("web\u{3000}timeout error");
+        // All 3 terms must match
+        assert!(f.matches_all_terms("[app-web] timeout error on connection"));
+        assert!(!f.matches_all_terms("[app-web] timeout on connection"));
+    }
 }

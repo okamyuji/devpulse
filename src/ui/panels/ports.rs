@@ -33,7 +33,12 @@ impl<'a> Widget for PortsPanel<'a> {
             SortDirection::Asc => "▲",
             SortDirection::Desc => "▼",
         };
-        let sort_info = format!(" {} items  Sort: {}{} (,/.:col S:dir) ", self.entries.len(), self.sort_column.label(), arrow);
+        let sort_info = format!(
+            " {} items  Sort: {}{} (,/.:col S:dir) ",
+            self.entries.len(),
+            self.sort_column.label(),
+            arrow
+        );
         let block = Block::default()
             .title(title)
             .title_bottom(sort_info)
@@ -56,8 +61,7 @@ impl<'a> Widget for PortsPanel<'a> {
                 }
             })
             .collect();
-        let header = Row::new(header_cols)
-            .style(Style::default().add_modifier(Modifier::BOLD));
+        let header = Row::new(header_cols).style(Style::default().add_modifier(Modifier::BOLD));
         let rows: Vec<Row> = self
             .entries
             .iter()

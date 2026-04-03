@@ -41,9 +41,26 @@ pub struct ProcessesConfig {
     pub dev_process_priority: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum LogSourceConfig {
+    #[serde(rename = "docker")]
+    Docker {
+        #[serde(default = "default_containers")]
+        containers: String,
+    },
+    #[serde(rename = "file")]
+    File { path: String },
+}
+
+fn default_containers() -> String {
+    "all".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LogsConfig {
+    pub sources: Vec<LogSourceConfig>,
     pub buffer_lines: usize,
     pub tail_follow: bool,
 }
@@ -93,6 +110,9 @@ impl Default for ProcessesConfig {
 impl Default for LogsConfig {
     fn default() -> Self {
         Self {
+            sources: vec![LogSourceConfig::Docker {
+                containers: "all".to_string(),
+            }],
             buffer_lines: 10000,
             tail_follow: true,
         }
@@ -107,6 +127,16 @@ impl Default for ThemeConfig {
     }
 }
 
+impl LogSourceConfig {
+    pub fn is_docker(&self) -> bool {
+        matches!(self, Self::Docker { .. })
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
@@ -116,5 +146,98 @@ impl Config {
         let mut config: Config = toml::from_str(&content)?;
         config.general.refresh_rate_ms = config.general.refresh_rate_ms.clamp(1000, 30000);
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_default_logs_config_has_docker_source() {
+        let config = LogsConfig::default();
+        assert_eq!(config.sources.len(), 1);
+        assert!(config.sources[0].is_docker());
+        assert_eq!(config.buffer_lines, 10000);
+        assert!(config.tail_follow);
+    }
+
+    #[test]
+    fn test_log_source_config_docker_default_containers() {
+        let src = LogSourceConfig::Docker {
+            containers: "all".to_string(),
+        };
+        assert!(src.is_docker());
+        assert!(!src.is_file());
+    }
+
+    #[test]
+    fn test_log_source_config_file() {
+        let src = LogSourceConfig::File {
+            path: "/var/log/*.log".to_string(),
+        };
+        assert!(src.is_file());
+        assert!(!src.is_docker());
+    }
+
+    #[test]
+    fn test_parse_toml_with_log_sources() {
+        let toml_str = r#"
+[logs]
+buffer_lines = 5000
+tail_follow = false
+
+[[logs.sources]]
+type = "docker"
+containers = "all"
+
+[[logs.sources]]
+type = "file"
+path = "/tmp/app.log"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.logs.sources.len(), 2);
+        assert!(config.logs.sources[0].is_docker());
+        assert!(config.logs.sources[1].is_file());
+        assert_eq!(config.logs.buffer_lines, 5000);
+        assert!(!config.logs.tail_follow);
+    }
+
+    #[test]
+    fn test_parse_toml_without_log_sources_uses_default() {
+        let toml_str = r#"
+[general]
+refresh_rate_ms = 3000
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.logs.sources.len(), 1);
+        assert!(config.logs.sources[0].is_docker());
+    }
+
+    #[test]
+    fn test_load_missing_file_uses_defaults() {
+        let config = Config::load(std::path::Path::new("/nonexistent/config.toml")).unwrap();
+        assert_eq!(config.logs.sources.len(), 1);
+        assert!(config.logs.sources[0].is_docker());
+    }
+
+    #[test]
+    fn test_load_toml_file_with_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            r#"
+[[logs.sources]]
+type = "file"
+path = "/tmp/test.log"
+"#
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.logs.sources.len(), 1);
+        assert!(config.logs.sources[0].is_file());
     }
 }

@@ -34,7 +34,12 @@ impl<'a> Widget for ProcessesPanel<'a> {
             SortDirection::Asc => "▲",
             SortDirection::Desc => "▼",
         };
-        let sort_info = format!(" {} items  Sort: {}{} (,/.:col S:dir) ", self.processes.len(), self.sort_column.label(), arrow);
+        let sort_info = format!(
+            " {} items  Sort: {}{} (,/.:col S:dir) ",
+            self.processes.len(),
+            self.sort_column.label(),
+            arrow
+        );
         let count_text = sort_info;
         let block = Block::default()
             .title(title)
@@ -59,8 +64,7 @@ impl<'a> Widget for ProcessesPanel<'a> {
                 }
             })
             .collect();
-        let header = Row::new(header_cols)
-            .style(Style::default().add_modifier(Modifier::BOLD));
+        let header = Row::new(header_cols).style(Style::default().add_modifier(Modifier::BOLD));
         let rows: Vec<Row> = self
             .processes
             .iter()

@@ -103,13 +103,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_widget(processes_panel, processes_area);
     }
 
-    // Logs panel
+    // Logs panel — uses log-local filter (AND condition) + Docker container filter
     let logs_area = panel_areas[Panel::Logs as usize];
     if logs_area.width > 0 && logs_area.height > 0 {
+        let container_filter = app.selected_container_name();
         let logs_panel = LogsPanel {
             buffer: &app.log_buffer,
             selected: app.panel_states[Panel::Logs as usize].selected_index,
-            filter_text,
+            filter_text: app.log_filter.query(),
+            container_filter: container_filter.as_deref(),
+            log_filter: &app.log_filter,
             is_focused: app.active_panel == Panel::Logs,
             tail_follow: app.tail_follow,
             wrap: app.wrap_logs,
@@ -137,21 +140,37 @@ pub fn draw(frame: &mut Frame, app: &App) {
         AppMode::GlobalFilter => {
             // Replace status bar with filter input
             if status_area.height > 0 {
-                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
-                    vec![
-                        Span::styled(
-                            " / Filter: ",
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{}|", app.global_filter.query()),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                    ],
-                ));
+                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
+                    Span::styled(
+                        " / Filter: ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}|", app.global_filter.query()),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+                frame.render_widget(filter_bar, status_area);
+            }
+        }
+        AppMode::LogFilter => {
+            if status_area.height > 0 {
+                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
+                    Span::styled(
+                        " f Log Filter (AND): ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}|", app.log_filter.query()),
+                        Style::default().fg(Color::Green),
+                    ),
+                ]));
                 frame.render_widget(filter_bar, status_area);
             }
         }
@@ -177,11 +196,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             (",/.", "Sort"),
             ("S", "Sort Dir"),
         ],
-        Panel::Docker => vec![
-            ("s", "Stop"),
-            ("r", "Restart"),
-            ("D", "Remove"),
-        ],
+        Panel::Docker => vec![("s", "Stop"), ("r", "Restart"), ("D", "Remove")],
         Panel::Processes => vec![
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
@@ -189,10 +204,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             (",/.", "Sort"),
             ("S", "Sort Dir"),
         ],
-        Panel::Logs => vec![
-            ("F", "Follow"),
-            ("w", "Wrap"),
-        ],
+        Panel::Logs => vec![("f", "Filter"), ("F", "Follow"), ("w", "Wrap")],
     };
 
     // Common hints
@@ -221,9 +233,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
     for (key, desc) in &context_hints {
         spans.push(Span::styled(
             format!(" {} ", key),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::DarkGray),
+            Style::default().fg(Color::Black).bg(Color::DarkGray),
         ));
         spans.push(Span::styled(
             format!(" {} ", desc),
@@ -238,9 +248,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
     for (key, desc) in &common_hints {
         spans.push(Span::styled(
             format!(" {} ", key),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::DarkGray),
+            Style::default().fg(Color::Black).bg(Color::DarkGray),
         ));
         spans.push(Span::styled(
             format!(" {} ", desc),
@@ -248,9 +256,7 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
         ));
     }
 
-    ratatui::widgets::Paragraph::new(Line::from(spans)).style(
-        Style::default().bg(Color::Black),
-    )
+    ratatui::widgets::Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Black))
 }
 
 /// Handle a key event, updating app state accordingly.
@@ -262,6 +268,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         AppMode::Confirm => handle_confirm_mode(app, key),
         AppMode::Help => handle_help_mode(app, key),
         AppMode::LocalFilter => false,
+        AppMode::LogFilter => handle_log_filter_mode(app, key),
     }
 }
 
@@ -392,6 +399,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             app.sort_toggle_direction();
             true
         }
+        KeyCode::Char('f') => {
+            if app.active_panel == Panel::Logs {
+                app.enter_log_filter();
+            }
+            true
+        }
         _ => false,
     }
 }
@@ -422,6 +435,37 @@ fn handle_global_filter_mode(app: &mut App, key: KeyEvent) -> bool {
             let mut query = app.global_filter.query().to_string();
             query.push(c);
             app.global_filter.set_query(&query);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_log_filter_mode(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.log_filter.clear();
+            app.mode = AppMode::Normal;
+            true
+        }
+        KeyCode::Enter => {
+            app.mode = AppMode::Normal;
+            true
+        }
+        KeyCode::Backspace => {
+            let query = app.log_filter.query().to_string();
+            if !query.is_empty() {
+                let mut chars = query.chars();
+                chars.next_back();
+                let new_query = chars.as_str();
+                app.log_filter.set_query(new_query);
+            }
+            true
+        }
+        KeyCode::Char(c) => {
+            let mut query = app.log_filter.query().to_string();
+            query.push(c);
+            app.log_filter.set_query(&query);
             true
         }
         _ => false,
@@ -601,6 +645,59 @@ mod tests {
         app.mode = AppMode::Confirm;
         app.confirm_message = "Kill process?".to_string();
         terminal.draw(|f| draw(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn test_f_key_enters_log_filter_on_logs_panel() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Logs;
+        handle_key(&mut app, make_key(KeyCode::Char('f')));
+        assert!(matches!(app.mode, AppMode::LogFilter));
+    }
+
+    #[test]
+    fn test_f_key_does_nothing_on_other_panels() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Ports;
+        handle_key(&mut app, make_key(KeyCode::Char('f')));
+        assert!(matches!(app.mode, AppMode::Normal));
+    }
+
+    #[test]
+    fn test_log_filter_input_and_clear() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Logs;
+        handle_key(&mut app, make_key(KeyCode::Char('f')));
+        assert!(matches!(app.mode, AppMode::LogFilter));
+        handle_key(&mut app, make_key(KeyCode::Char('e')));
+        handle_key(&mut app, make_key(KeyCode::Char('r')));
+        handle_key(&mut app, make_key(KeyCode::Char('r')));
+        assert_eq!(app.log_filter.query(), "err");
+        // Enter confirms
+        handle_key(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(app.mode, AppMode::Normal));
+        assert_eq!(app.log_filter.query(), "err");
+    }
+
+    #[test]
+    fn test_log_filter_esc_clears() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Logs;
+        handle_key(&mut app, make_key(KeyCode::Char('f')));
+        handle_key(&mut app, make_key(KeyCode::Char('x')));
+        handle_key(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(app.mode, AppMode::Normal));
+        assert_eq!(app.log_filter.query(), "");
+    }
+
+    #[test]
+    fn test_global_filter_does_not_affect_logs_panel() {
+        // Verify that global filter text is NOT passed to logs panel
+        let mut app = App::new(Config::default());
+        app.global_filter.set_query("node");
+        // The logs panel should use app.log_filter, not app.global_filter
+        assert_eq!(app.log_filter.query(), "");
+        assert_eq!(app.global_filter.query(), "node");
     }
 
     #[test]

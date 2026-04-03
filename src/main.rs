@@ -30,11 +30,45 @@ pub struct Cli {
     pub no_docker: bool,
     #[arg(long)]
     pub refresh: Option<u64>,
+    /// Print sample config to stdout and exit
+    #[arg(long)]
+    pub show_config: bool,
+    /// Write sample config to ~/.config/devpulse/config.toml and exit
+    #[arg(long)]
+    pub init_config: bool,
 }
+
+/// Sample config embedded at compile time (available in both debug and release)
+const SAMPLE_CONFIG: &str = include_str!("../config.sample.toml");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // --show-config: print sample and exit
+    if cli.show_config {
+        print!("{}", SAMPLE_CONFIG);
+        return Ok(());
+    }
+
+    // --init-config: write sample to default path
+    if cli.init_config {
+        let dest = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from(".config"))
+            .join("devpulse")
+            .join("config.toml");
+        if dest.exists() {
+            eprintln!("Config already exists: {}", dest.display());
+            eprintln!("Remove it first or edit it directly.");
+            std::process::exit(1);
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, SAMPLE_CONFIG)?;
+        println!("Config written to: {}", dest.display());
+        return Ok(());
+    }
 
     // Load config
     let config_path = cli.config.unwrap_or_else(|| {
@@ -79,6 +113,9 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Start background log collection
+    app.start_log_collection();
+
     // Initial data fetch
     app.tick();
     app.tick_docker().await;
@@ -115,6 +152,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Drain log entries from background collectors
+        app.drain_logs();
+
         // Tick
         if last_tick.elapsed() >= tick_rate {
             app.tick();
@@ -141,6 +181,22 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn test_sample_config_embedded() {
+        assert!(!SAMPLE_CONFIG.is_empty());
+        assert!(SAMPLE_CONFIG.contains("[logs]"));
+        assert!(SAMPLE_CONFIG.contains("[[logs.sources]]"));
+        assert!(SAMPLE_CONFIG.contains("[docker]"));
+    }
+
+    #[test]
+    fn test_sample_config_is_valid_toml() {
+        let config: devpulse::config::Config = toml::from_str(SAMPLE_CONFIG).unwrap();
+        assert_eq!(config.general.refresh_rate_ms, 2000);
+        assert_eq!(config.logs.sources.len(), 1);
+        assert!(config.logs.sources[0].is_docker());
+    }
+
+    #[test]
     fn test_default_cli_args() {
         let args = Cli::parse_from(["devpulse"]);
         assert!(args.config.is_none());
@@ -148,6 +204,8 @@ mod tests {
         assert_eq!(args.layout, None);
         assert!(!args.no_docker);
         assert!(args.refresh.is_none());
+        assert!(!args.show_config);
+        assert!(!args.init_config);
     }
 
     #[test]

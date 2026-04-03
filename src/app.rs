@@ -3,17 +3,20 @@ use crate::config::Config;
 use crate::data::docker::ContainerInfo;
 #[cfg(not(test))]
 use crate::data::docker::{BollardDockerSource, DockerSource};
-use crate::data::logs::LogBuffer;
+use crate::data::log_collector;
+use crate::data::logs::{LogBuffer, LogEntry};
 use crate::data::ports::{PortEntry, SystemPortScanner};
 use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
 use crate::filter::FilterState;
+use tokio::sync::mpsc;
 
 #[derive(Debug, PartialEq)]
 pub enum AppMode {
     Normal,
     GlobalFilter,
     LocalFilter,
+    LogFilter,
     Confirm,
     Help,
 }
@@ -147,6 +150,10 @@ pub struct App {
     pub process_sort_dir: SortDirection,
     pub port_sort: PortSortColumn,
     pub port_sort_dir: SortDirection,
+    // Log-panel-local filter (AND condition, separate from global filter)
+    pub log_filter: FilterState,
+    // Log collection receiver
+    log_rx: Option<mpsc::Receiver<LogEntry>>,
     // Internal data sources
     sys: sysinfo::System,
     #[cfg(not(test))]
@@ -194,6 +201,7 @@ impl App {
             docker_available,
             pending_action: None,
             confirm_message: String::new(),
+            log_filter: FilterState::new(),
             tail_follow,
             wrap_logs: false,
             tree_mode: false,
@@ -201,6 +209,7 @@ impl App {
             process_sort_dir: SortDirection::Desc,
             port_sort: PortSortColumn::Port,
             port_sort_dir: SortDirection::Asc,
+            log_rx: None,
             sys: sysinfo::System::new(),
             #[cfg(not(test))]
             docker_source,
@@ -328,9 +337,10 @@ impl App {
         self.port_entries.sort_by(|a, b| {
             let ord = match scol {
                 PortSortColumn::Port => a.port.cmp(&b.port),
-                PortSortColumn::Process => {
-                    a.process_name.to_lowercase().cmp(&b.process_name.to_lowercase())
-                }
+                PortSortColumn::Process => a
+                    .process_name
+                    .to_lowercase()
+                    .cmp(&b.process_name.to_lowercase()),
                 PortSortColumn::Cpu => a
                     .cpu_percent
                     .partial_cmp(&b.cpu_percent)
@@ -342,6 +352,24 @@ impl App {
                 SortDirection::Desc => ord.reverse(),
             }
         });
+    }
+
+    /// Start background log collection tasks. Must be called from a tokio runtime.
+    pub fn start_log_collection(&mut self) {
+        let rx = log_collector::spawn_log_collectors(
+            &self.config.logs.sources,
+            self.config.logs.buffer_lines,
+        );
+        self.log_rx = Some(rx);
+    }
+
+    /// Drain any pending log entries from background collectors into the buffer.
+    pub fn drain_logs(&mut self) {
+        if let Some(rx) = &mut self.log_rx {
+            while let Ok(entry) = rx.try_recv() {
+                self.log_buffer.push(entry);
+            }
+        }
     }
 
     /// Refresh live data from system sources (ports, processes, docker)
@@ -470,6 +498,17 @@ impl App {
         let idx = self.panel_states[Panel::Docker as usize].selected_index;
         self.docker_containers.get(idx).map(|c| c.id.clone())
     }
+
+    /// Get the selected Docker container name (if any)
+    pub fn selected_container_name(&self) -> Option<String> {
+        let idx = self.panel_states[Panel::Docker as usize].selected_index;
+        self.docker_containers.get(idx).map(|c| c.name.clone())
+    }
+
+    /// Enter log filter mode (f key on Logs panel)
+    pub fn enter_log_filter(&mut self) {
+        self.mode = AppMode::LogFilter;
+    }
 }
 
 #[cfg(test)]
@@ -566,6 +605,43 @@ mod tests {
         assert_eq!(app.panel_states[0].selected_index, 0);
     }
     #[test]
+    fn test_drain_logs_with_receiver() {
+        use crate::data::logs::{LogEntry, LogLevel};
+        let mut app = test_app();
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        app.log_rx = Some(rx);
+
+        // Send some log entries
+        tx.try_send(LogEntry {
+            timestamp: 1,
+            source: "test".into(),
+            level: LogLevel::Info,
+            message: "hello".into(),
+        })
+        .unwrap();
+        tx.try_send(LogEntry {
+            timestamp: 2,
+            source: "test".into(),
+            level: LogLevel::Error,
+            message: "error".into(),
+        })
+        .unwrap();
+
+        app.drain_logs();
+        assert_eq!(app.log_buffer.len(), 2);
+        assert_eq!(app.log_buffer.entries()[0].message, "hello");
+        assert_eq!(app.log_buffer.entries()[1].message, "error");
+    }
+
+    #[test]
+    fn test_drain_logs_without_receiver() {
+        let mut app = test_app();
+        // log_rx is None in test mode; should not panic
+        app.drain_logs();
+        assert_eq!(app.log_buffer.len(), 0);
+    }
+
+    #[test]
     fn test_live_data_fields_initialized() {
         let app = test_app();
         assert!(app.port_entries.is_empty());
@@ -575,6 +651,57 @@ mod tests {
         assert!(app.pending_action.is_none());
         assert!(app.confirm_message.is_empty());
     }
+    #[test]
+    fn test_log_filter_independent_from_global() {
+        let mut app = test_app();
+        app.global_filter.set_query("node");
+        app.log_filter.set_query("error timeout");
+        assert_eq!(app.global_filter.query(), "node");
+        assert_eq!(app.log_filter.query(), "error timeout");
+        assert!(app.log_filter.matches_all_terms("[app] error timeout"));
+        assert!(!app.log_filter.matches_all_terms("[app] error only"));
+    }
+
+    #[test]
+    fn test_enter_log_filter_mode() {
+        let mut app = test_app();
+        app.active_panel = Panel::Logs;
+        app.enter_log_filter();
+        assert!(matches!(app.mode, AppMode::LogFilter));
+    }
+
+    #[test]
+    fn test_selected_container_name() {
+        use crate::data::docker::{ContainerInfo, ContainerState};
+        let mut app = test_app();
+        app.docker_containers.push(ContainerInfo {
+            id: "abc123".into(),
+            name: "app-web".into(),
+            image: "node:18".into(),
+            state: ContainerState::Running,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_limit: 0,
+            ports: vec![],
+            compose_project: None,
+            created: "2026-01-01".into(),
+        });
+        app.docker_containers.push(ContainerInfo {
+            id: "def456".into(),
+            name: "app-db".into(),
+            image: "postgres:15".into(),
+            state: ContainerState::Running,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_limit: 0,
+            ports: vec![],
+            compose_project: None,
+            created: "2026-01-01".into(),
+        });
+        app.panel_states[Panel::Docker as usize].selected_index = 1;
+        assert_eq!(app.selected_container_name(), Some("app-db".to_string()));
+    }
+
     #[test]
     fn test_pending_action() {
         let mut app = test_app();
