@@ -27,8 +27,10 @@ impl<'a> Widget for DockerPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let count_text = format!(" {} items ", self.containers.len());
         let block = Block::default()
             .title(title)
+            .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
         if !self.is_available {

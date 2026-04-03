@@ -29,8 +29,10 @@ impl<'a> Widget for LogsPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let count_text = format!(" {} lines ", self.buffer.len());
         let block = Block::default()
             .title(title)
+            .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
         let lines: Vec<Line> = self

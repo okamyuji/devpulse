@@ -3,6 +3,8 @@ pub mod layout;
 pub mod panels;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 use ratatui::Frame;
 
 use crate::action::Action;
@@ -21,7 +23,7 @@ use crate::ui::panels::processes::ProcessesPanel;
 /// Draw all panels and overlays onto the frame
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let panel_areas = compute_layout(area, LayoutMode::Quad, app.fullscreen_panel);
+    let (panel_areas, status_area) = compute_layout(area, LayoutMode::Quad, app.fullscreen_panel);
     let filter_text = app.global_filter.query();
     let filter_active = app.global_filter.is_active();
 
@@ -111,7 +113,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_widget(logs_panel, logs_area);
     }
 
-    // Overlays
+    // Status bar (always visible)
+    if status_area.height > 0 {
+        let status_line = build_status_line(app);
+        frame.render_widget(status_line, status_area);
+    }
+
+    // Overlays (drawn on top of everything)
     match app.mode {
         AppMode::Confirm => {
             let dialog = ConfirmDialog {
@@ -123,24 +131,118 @@ pub fn draw(frame: &mut Frame, app: &App) {
             frame.render_widget(HelpOverlay, area);
         }
         AppMode::GlobalFilter => {
-            // Show filter bar at bottom
-            let filter_bar =
-                ratatui::widgets::Paragraph::new(format!("Filter: {}|", app.global_filter.query()))
-                    .style(
-                        ratatui::style::Style::default()
-                            .fg(ratatui::style::Color::Yellow)
-                            .add_modifier(ratatui::style::Modifier::BOLD),
-                    );
-            let bar_area = ratatui::layout::Rect {
-                x: area.x,
-                y: area.y + area.height.saturating_sub(1),
-                width: area.width,
-                height: 1,
-            };
-            frame.render_widget(filter_bar, bar_area);
+            // Replace status bar with filter input
+            if status_area.height > 0 {
+                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(
+                    vec![
+                        Span::styled(
+                            " / Filter: ",
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{}|", app.global_filter.query()),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                    ],
+                ));
+                frame.render_widget(filter_bar, status_area);
+            }
         }
         _ => {}
     }
+}
+
+fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
+    use ratatui::text::Line;
+
+    let panel_name = match app.active_panel {
+        Panel::Ports => "Ports",
+        Panel::Docker => "Docker",
+        Panel::Processes => "Processes",
+        Panel::Logs => "Logs",
+    };
+
+    // Context-sensitive hints based on active panel
+    let context_hints: Vec<(&str, &str)> = match app.active_panel {
+        Panel::Ports => vec![
+            ("K", "Kill"),
+            ("Ctrl+K", "Force Kill"),
+        ],
+        Panel::Docker => vec![
+            ("s", "Stop"),
+            ("r", "Restart"),
+            ("D", "Remove"),
+        ],
+        Panel::Processes => vec![
+            ("K", "Kill"),
+            ("Ctrl+K", "Force Kill"),
+            ("t", "Tree"),
+        ],
+        Panel::Logs => vec![
+            ("F", "Follow"),
+            ("w", "Wrap"),
+        ],
+    };
+
+    // Common hints
+    let common_hints: Vec<(&str, &str)> = vec![
+        ("j/k", "Nav"),
+        ("Tab", "Panel"),
+        ("1-4", "Jump"),
+        ("/", "Filter"),
+        ("?", "Help"),
+        ("q", "Quit"),
+    ];
+
+    let mut spans = Vec::new();
+
+    // Panel indicator
+    spans.push(Span::styled(
+        format!(" {} ", panel_name),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(" "));
+
+    // Context hints
+    for (key, desc) in &context_hints {
+        spans.push(Span::styled(
+            format!(" {} ", key),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            format!(" {} ", desc),
+            Style::default().fg(Color::White),
+        ));
+    }
+
+    // Separator
+    spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+
+    // Common hints
+    for (key, desc) in &common_hints {
+        spans.push(Span::styled(
+            format!(" {} ", key),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            format!(" {} ", desc),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+
+    ratatui::widgets::Paragraph::new(Line::from(spans)).style(
+        Style::default().bg(Color::Black),
+    )
 }
 
 /// Handle a key event, updating app state accordingly.

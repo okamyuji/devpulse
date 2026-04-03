@@ -27,8 +27,10 @@ impl<'a> Widget for ProcessesPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let count_text = format!(" {} items ", self.processes.len());
         let block = Block::default()
             .title(title)
+            .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
         let header = Row::new(vec!["PID", "NAME", "CPU%", "MEM", "PORTS", "CMD"])

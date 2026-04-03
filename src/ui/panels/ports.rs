@@ -26,8 +26,10 @@ impl<'a> Widget for PortsPanel<'a> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let count_text = format!(" {} items ", self.entries.len());
         let block = Block::default()
             .title(title)
+            .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
         let header = Row::new(vec!["PORT", "PROTO", "PROCESS", "PID", "CPU%", "MEM"])
