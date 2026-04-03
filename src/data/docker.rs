@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use bollard::container::ListContainersOptions;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum ContainerState {
@@ -50,30 +52,167 @@ pub trait DockerSource: Send + Sync {
     fn is_available(&self) -> bool;
 }
 
+pub struct BollardDockerSource {
+    client: Option<bollard::Docker>,
+}
+
+impl Default for BollardDockerSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BollardDockerSource {
+    pub fn new() -> Self {
+        let client = bollard::Docker::connect_with_local_defaults().ok();
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl DockerSource for BollardDockerSource {
+    async fn list_containers(&self) -> Result<Vec<ContainerInfo>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        let mut filters = HashMap::new();
+        filters.insert("status", vec!["running", "exited", "created", "paused"]);
+        let options = Some(ListContainersOptions {
+            all: true,
+            filters,
+            ..Default::default()
+        });
+        let containers = client.list_containers(options).await?;
+        let mut result = Vec::new();
+        for c in containers {
+            let name = c
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|n| n.trim_start_matches('/').to_string())
+                .unwrap_or_default();
+            let image = c.image.clone().unwrap_or_default();
+            let state_str = c.state.clone().unwrap_or_default();
+            let state = match state_str.as_str() {
+                "running" => ContainerState::Running,
+                "created" => ContainerState::Created,
+                "exited" => ContainerState::Exited(0),
+                _ => ContainerState::Stopped,
+            };
+            let ports = c
+                .ports
+                .as_ref()
+                .map(|ports| {
+                    ports
+                        .iter()
+                        .filter_map(|p| {
+                            Some(PortMapping {
+                                host: p.public_port?,
+                                container: p.private_port,
+                                protocol: p.typ.map(|t| format!("{:?}", t)).unwrap_or_default(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let compose_project = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("com.docker.compose.project").cloned());
+            result.push(ContainerInfo {
+                id: c.id.clone().unwrap_or_default(),
+                name,
+                image,
+                state,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports,
+                compose_project,
+                created: c.created.map(|t| t.to_string()).unwrap_or_default(),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn stop_container(&self, id: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        client.stop_container(id, None).await?;
+        Ok(())
+    }
+
+    async fn restart_container(&self, id: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        client.restart_container(id, None).await?;
+        Ok(())
+    }
+
+    async fn remove_container(&self, id: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        client.remove_container(id, None).await?;
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        self.client.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct MockDockerSource { containers: Vec<ContainerInfo> }
+    struct MockDockerSource {
+        containers: Vec<ContainerInfo>,
+    }
 
     #[async_trait]
     impl DockerSource for MockDockerSource {
-        async fn list_containers(&self) -> Result<Vec<ContainerInfo>> { Ok(self.containers.clone()) }
-        async fn stop_container(&self, _id: &str) -> Result<()> { Ok(()) }
-        async fn restart_container(&self, _id: &str) -> Result<()> { Ok(()) }
-        async fn remove_container(&self, _id: &str) -> Result<()> { Ok(()) }
-        fn is_available(&self) -> bool { true }
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>> {
+            Ok(self.containers.clone())
+        }
+        async fn stop_container(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn restart_container(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_container(&self, _id: &str) -> Result<()> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
     }
 
     #[tokio::test]
     async fn test_mock_list_containers() {
         let source = MockDockerSource {
             containers: vec![ContainerInfo {
-                id: "abc123".into(), name: "app-web".into(), image: "node:18".into(),
-                state: ContainerState::Running, cpu_percent: 12.0,
-                memory_bytes: 340_000_000, memory_limit: 1_000_000_000,
-                ports: vec![PortMapping { host: 3000, container: 3000, protocol: "tcp".into() }],
-                compose_project: Some("myapp".into()), created: "2026-04-03T10:00:00Z".into(),
+                id: "abc123".into(),
+                name: "app-web".into(),
+                image: "node:18".into(),
+                state: ContainerState::Running,
+                cpu_percent: 12.0,
+                memory_bytes: 340_000_000,
+                memory_limit: 1_000_000_000,
+                ports: vec![PortMapping {
+                    host: 3000,
+                    container: 3000,
+                    protocol: "tcp".into(),
+                }],
+                compose_project: Some("myapp".into()),
+                created: "2026-04-03T10:00:00Z".into(),
             }],
         };
         let containers = source.list_containers().await.unwrap();
