@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use bollard::container::ListContainersOptions;
+use bollard::query_parameters::ListContainersOptionsBuilder;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -78,12 +78,11 @@ impl DockerSource for BollardDockerSource {
             .ok_or_else(|| anyhow!("Docker not available"))?;
         let mut filters = HashMap::new();
         filters.insert("status", vec!["running", "exited", "created", "paused"]);
-        let options = Some(ListContainersOptions {
-            all: true,
-            filters,
-            ..Default::default()
-        });
-        let containers = client.list_containers(options).await?;
+        let options = ListContainersOptionsBuilder::default()
+            .all(true)
+            .filters(&filters)
+            .build();
+        let containers = client.list_containers(Some(options)).await?;
         let mut result = Vec::new();
         for c in containers {
             let name = c
@@ -93,11 +92,11 @@ impl DockerSource for BollardDockerSource {
                 .map(|n| n.trim_start_matches('/').to_string())
                 .unwrap_or_default();
             let image = c.image.clone().unwrap_or_default();
-            let state_str = c.state.clone().unwrap_or_default();
-            let state = match state_str.as_str() {
-                "running" => ContainerState::Running,
-                "created" => ContainerState::Created,
-                "exited" => ContainerState::Exited(0),
+            use bollard::models::ContainerSummaryStateEnum;
+            let state = match c.state {
+                Some(ContainerSummaryStateEnum::RUNNING) => ContainerState::Running,
+                Some(ContainerSummaryStateEnum::CREATED) => ContainerState::Created,
+                Some(ContainerSummaryStateEnum::EXITED) => ContainerState::Exited(0),
                 _ => ContainerState::Stopped,
             };
             let ports = c

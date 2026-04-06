@@ -38,7 +38,7 @@ pub fn spawn_log_collectors(
 
 /// Stream logs from Docker containers using bollard.
 async fn stream_docker_logs(tx: mpsc::Sender<LogEntry>, containers: &str) -> anyhow::Result<()> {
-    use bollard::container::LogsOptions;
+    use bollard::query_parameters::{ListContainersOptionsBuilder, LogsOptionsBuilder};
     use bollard::Docker;
     use futures_util::StreamExt;
 
@@ -46,16 +46,12 @@ async fn stream_docker_logs(tx: mpsc::Sender<LogEntry>, containers: &str) -> any
 
     // Determine which containers to stream
     let container_ids: Vec<String> = if containers == "all" {
-        let containers = docker
-            .list_containers::<String>(Some(bollard::container::ListContainersOptions {
-                filters: {
-                    let mut f = std::collections::HashMap::new();
-                    f.insert("status".to_string(), vec!["running".to_string()]);
-                    f
-                },
-                ..Default::default()
-            }))
-            .await?;
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("status", vec!["running"]);
+        let options = ListContainersOptionsBuilder::default()
+            .filters(&filters)
+            .build();
+        let containers = docker.list_containers(Some(options)).await?;
         containers.into_iter().filter_map(|c| c.id).collect()
     } else {
         containers
@@ -77,13 +73,12 @@ async fn stream_docker_logs(tx: mpsc::Sender<LogEntry>, containers: &str) -> any
             let name = get_container_name(&docker, &id)
                 .await
                 .unwrap_or_else(|| id[..12.min(id.len())].to_string());
-            let options = LogsOptions::<String> {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                tail: "50".to_string(),
-                ..Default::default()
-            };
+            let options = LogsOptionsBuilder::default()
+                .follow(true)
+                .stdout(true)
+                .stderr(true)
+                .tail("50")
+                .build();
             let mut stream = docker.logs(&id, Some(options));
             while let Some(result) = stream.next().await {
                 match result {
