@@ -137,42 +137,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
         AppMode::Help => {
             frame.render_widget(HelpOverlay, area);
         }
-        AppMode::GlobalFilter => {
+        AppMode::GlobalFilter | AppMode::LogFilter if status_area.height > 0 => {
             // Replace status bar with filter input
-            if status_area.height > 0 {
-                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
-                    Span::styled(
-                        " / Filter: ",
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{}|", app.global_filter.query()),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                ]));
-                frame.render_widget(filter_bar, status_area);
-            }
-        }
-        AppMode::LogFilter => {
-            if status_area.height > 0 {
-                let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
-                    Span::styled(
-                        " f Log Filter (AND): ",
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{}|", app.log_filter.query()),
-                        Style::default().fg(Color::Green),
-                    ),
-                ]));
-                frame.render_widget(filter_bar, status_area);
-            }
+            let (label, color, query) = match app.mode {
+                AppMode::GlobalFilter => (" / Filter: ", Color::Yellow, app.global_filter.query()),
+                AppMode::LogFilter => (
+                    " f Log Filter (AND): ",
+                    Color::Green,
+                    app.log_filter.query(),
+                ),
+                _ => unreachable!(),
+            };
+            let filter_bar = ratatui::widgets::Paragraph::new(ratatui::text::Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("{query}|"), Style::default().fg(color)),
+            ]));
+            frame.render_widget(filter_bar, status_area);
         }
         _ => {}
     }
