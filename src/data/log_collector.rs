@@ -1,22 +1,19 @@
-use crate::config::{DockerConfig, LogSourceConfig};
+use crate::config::LogSourceConfig;
 use crate::data::docker_connector::{self, DockerEndpoint};
 use crate::data::logs::{LogEntry, LogLevel};
 use tokio::sync::mpsc;
 
 /// Spawn background log collection tasks based on config.
-/// Returns a receiver that yields LogEntry items.
+///
+/// `docker_endpoint` should be pre-resolved by the caller
+/// (typically via `BollardDockerSource::endpoint()`) so the Docker
+/// connection is resolved exactly once per process.
 pub fn spawn_log_collectors(
     sources: &[LogSourceConfig],
-    docker_cfg: &DockerConfig,
+    docker_endpoint: Option<DockerEndpoint>,
     buffer_size: usize,
 ) -> mpsc::Receiver<LogEntry> {
     let (tx, rx) = mpsc::channel(buffer_size.min(1024));
-
-    // Resolve Docker endpoint once; share it with every Docker log task.
-    let docker_endpoint =
-        docker_connector::resolve_endpoint(docker_cfg, &docker_connector::RealEnv)
-            .resolved
-            .map(|r| r.endpoint);
 
     for source in sources {
         match source {
@@ -378,7 +375,7 @@ mod tests {
         let sources = vec![LogSourceConfig::File {
             path: format!("{}/*.log", dir.path().display()),
         }];
-        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
+        let mut rx = spawn_log_collectors(&sources, None, 100);
 
         // Should receive the initial tail lines
         let entry1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -404,7 +401,7 @@ mod tests {
         let sources = vec![LogSourceConfig::File {
             path: format!("{}/*.log", dir.path().display()),
         }];
-        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
+        let mut rx = spawn_log_collectors(&sources, None, 100);
 
         // Wait for watcher to initialize (macOS FSEvents can be slow)
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -433,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_with_empty_sources() {
         let sources: Vec<LogSourceConfig> = vec![];
-        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
+        let mut rx = spawn_log_collectors(&sources, None, 100);
 
         // With no sources, receiver should eventually close (all senders dropped)
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;

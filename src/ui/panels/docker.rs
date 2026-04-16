@@ -52,11 +52,11 @@ impl<'a> Widget for DockerPanel<'a> {
             let max_rows = inner.height.saturating_sub(1) as usize;
             for (i, line) in self.resolution_summary.iter().take(max_rows).enumerate() {
                 let row_y = inner.y + 1 + i as u16;
-                let truncated: String = line.chars().take(inner.width as usize).collect();
-                buf.set_string(
+                buf.set_stringn(
                     inner.x,
                     row_y,
-                    truncated,
+                    line,
+                    inner.width as usize,
                     Style::default().fg(Color::DarkGray),
                 );
             }

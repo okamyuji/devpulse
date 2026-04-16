@@ -277,8 +277,15 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker> {
             120,
             bollard::API_DEFAULT_VERSION,
         )?),
+        #[cfg(windows)]
+        DockerEndpoint::NamedPipe(pipe) => Ok(bollard::Docker::connect_with_named_pipe(
+            pipe,
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )?),
+        #[cfg(not(windows))]
         DockerEndpoint::NamedPipe(_) => Err(anyhow!(
-            "named pipe endpoints are not supported on this platform"
+            "named pipe endpoints are only supported on Windows"
         )),
     }
 }

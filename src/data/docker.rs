@@ -1,5 +1,5 @@
 use crate::config::DockerConfig;
-use crate::data::docker_connector::{self, ResolutionReport};
+use crate::data::docker_connector::{self, DockerEndpoint, ResolutionReport};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bollard::query_parameters::ListContainersOptionsBuilder;
@@ -57,28 +57,35 @@ pub trait DockerSource: Send + Sync {
 pub struct BollardDockerSource {
     client: Option<bollard::Docker>,
     context_name: Option<String>,
+    endpoint: Option<DockerEndpoint>,
     report: ResolutionReport,
 }
 
 impl BollardDockerSource {
     pub fn new(cfg: &DockerConfig) -> Self {
         let report = docker_connector::resolve_endpoint(cfg, &docker_connector::RealEnv);
-        let (client, context_name) = match report.resolved.as_ref() {
+        let (client, context_name, endpoint) = match report.resolved.as_ref() {
             Some(r) => (
                 docker_connector::connect(&r.endpoint).ok(),
                 r.context_name.clone(),
+                Some(r.endpoint.clone()),
             ),
-            None => (None, None),
+            None => (None, None, None),
         };
         Self {
             client,
             context_name,
+            endpoint,
             report,
         }
     }
 
     pub fn context_name(&self) -> Option<&str> {
         self.context_name.as_deref()
+    }
+
+    pub fn endpoint(&self) -> Option<&DockerEndpoint> {
+        self.endpoint.as_ref()
     }
 
     pub fn report(&self) -> &ResolutionReport {
