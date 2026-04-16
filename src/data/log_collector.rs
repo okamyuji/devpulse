@@ -1,4 +1,5 @@
-use crate::config::LogSourceConfig;
+use crate::config::{DockerConfig, LogSourceConfig};
+use crate::data::docker_connector::{self, DockerEndpoint};
 use crate::data::logs::{LogEntry, LogLevel};
 use tokio::sync::mpsc;
 
@@ -6,18 +7,33 @@ use tokio::sync::mpsc;
 /// Returns a receiver that yields LogEntry items.
 pub fn spawn_log_collectors(
     sources: &[LogSourceConfig],
+    docker_cfg: &DockerConfig,
     buffer_size: usize,
 ) -> mpsc::Receiver<LogEntry> {
     let (tx, rx) = mpsc::channel(buffer_size.min(1024));
+
+    // Resolve Docker endpoint once; share it with every Docker log task.
+    let docker_endpoint =
+        docker_connector::resolve_endpoint(docker_cfg, &docker_connector::RealEnv)
+            .resolved
+            .map(|r| r.endpoint);
 
     for source in sources {
         match source {
             LogSourceConfig::Docker { containers } => {
                 let tx = tx.clone();
                 let containers = containers.clone();
+                let endpoint = docker_endpoint.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = stream_docker_logs(tx, &containers).await {
-                        tracing::warn!("Docker log stream ended: {}", e);
+                    match endpoint {
+                        Some(ep) => {
+                            if let Err(e) = stream_docker_logs(tx, &ep, &containers).await {
+                                tracing::warn!("Docker log stream ended: {}", e);
+                            }
+                        }
+                        None => {
+                            tracing::warn!("Docker log stream disabled: no endpoint resolved");
+                        }
                     }
                 });
             }
@@ -37,12 +53,15 @@ pub fn spawn_log_collectors(
 }
 
 /// Stream logs from Docker containers using bollard.
-async fn stream_docker_logs(tx: mpsc::Sender<LogEntry>, containers: &str) -> anyhow::Result<()> {
+async fn stream_docker_logs(
+    tx: mpsc::Sender<LogEntry>,
+    endpoint: &DockerEndpoint,
+    containers: &str,
+) -> anyhow::Result<()> {
     use bollard::query_parameters::{ListContainersOptionsBuilder, LogsOptionsBuilder};
-    use bollard::Docker;
     use futures_util::StreamExt;
 
-    let docker = Docker::connect_with_local_defaults()?;
+    let docker = docker_connector::connect(endpoint)?;
 
     // Determine which containers to stream
     let container_ids: Vec<String> = if containers == "all" {
@@ -359,7 +378,7 @@ mod tests {
         let sources = vec![LogSourceConfig::File {
             path: format!("{}/*.log", dir.path().display()),
         }];
-        let mut rx = spawn_log_collectors(&sources, 100);
+        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
 
         // Should receive the initial tail lines
         let entry1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -385,7 +404,7 @@ mod tests {
         let sources = vec![LogSourceConfig::File {
             path: format!("{}/*.log", dir.path().display()),
         }];
-        let mut rx = spawn_log_collectors(&sources, 100);
+        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
 
         // Wait for watcher to initialize (macOS FSEvents can be slow)
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -414,7 +433,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_with_empty_sources() {
         let sources: Vec<LogSourceConfig> = vec![];
-        let mut rx = spawn_log_collectors(&sources, 100);
+        let mut rx = spawn_log_collectors(&sources, &DockerConfig::default(), 100);
 
         // With no sources, receiver should eventually close (all senders dropped)
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
