@@ -107,7 +107,12 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     if let Some(rest) = raw.strip_prefix("unix://") {
         return Some(DockerEndpoint::UnixSocket(PathBuf::from(rest)));
     }
-    if raw.starts_with("tcp://") || raw.starts_with("http://") || raw.starts_with("https://") {
+    // Docker accepts tcp:// but hyper::Uri (used by bollard) only understands
+    // http(s)://, so normalize tcp:// to http:// here.
+    if let Some(rest) = raw.strip_prefix("tcp://") {
+        return Some(DockerEndpoint::Http(format!("http://{}", rest)));
+    }
+    if raw.starts_with("http://") || raw.starts_with("https://") {
         return Some(DockerEndpoint::Http(raw.to_string()));
     }
     if let Some(rest) = raw.strip_prefix("npipe://") {
@@ -375,10 +380,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_tcp_url() {
+    fn parse_tcp_url_normalizes_to_http() {
         assert_eq!(
             parse_endpoint("tcp://1.2.3.4:2375"),
-            Some(DockerEndpoint::Http("tcp://1.2.3.4:2375".into()))
+            Some(DockerEndpoint::Http("http://1.2.3.4:2375".into()))
+        );
+    }
+
+    #[test]
+    fn parse_http_url_preserved() {
+        assert_eq!(
+            parse_endpoint("http://1.2.3.4:2375"),
+            Some(DockerEndpoint::Http("http://1.2.3.4:2375".into()))
+        );
+    }
+
+    #[test]
+    fn parse_https_url_preserved() {
+        assert_eq!(
+            parse_endpoint("https://docker.example:2376"),
+            Some(DockerEndpoint::Http("https://docker.example:2376".into()))
         );
     }
 
@@ -404,7 +425,7 @@ mod tests {
         assert_eq!(resolved.source, EndpointSource::EnvVar);
         assert_eq!(
             resolved.endpoint,
-            DockerEndpoint::Http("tcp://example:2375".into())
+            DockerEndpoint::Http("http://example:2375".into())
         );
         assert!(resolved.context_name.is_none());
     }
@@ -537,6 +558,6 @@ mod tests {
         let lines = r.summary_lines();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("DOCKER_HOST"));
-        assert!(lines[0].contains("tcp://x:1"));
+        assert!(lines[0].contains("http://x:1"));
     }
 }
