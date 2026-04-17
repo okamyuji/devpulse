@@ -46,13 +46,13 @@ impl ResolutionReport {
     }
 }
 
-fn source_label(src: &EndpointSource) -> &'static str {
+fn source_label(src: &EndpointSource) -> String {
     match src {
-        EndpointSource::EnvVar => "DOCKER_HOST",
-        EndpointSource::Config => "config.toml",
-        EndpointSource::CliContext(_) => "docker context",
-        EndpointSource::Probe(_) => "probe",
-        EndpointSource::Default => "default",
+        EndpointSource::EnvVar => "DOCKER_HOST".to_string(),
+        EndpointSource::Config => "config.toml".to_string(),
+        EndpointSource::CliContext(name) => format!("docker context ({})", name),
+        EndpointSource::Probe(name) => format!("probe ({})", name),
+        EndpointSource::Default => "default".to_string(),
     }
 }
 
@@ -118,7 +118,7 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     if let Some(rest) = raw.strip_prefix("npipe://") {
         return Some(DockerEndpoint::NamedPipe(rest.to_string()));
     }
-    if raw.starts_with('/') {
+    if Path::new(raw).is_absolute() {
         return Some(DockerEndpoint::UnixSocket(PathBuf::from(raw)));
     }
     None
@@ -559,5 +559,40 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("DOCKER_HOST"));
         assert!(lines[0].contains("http://x:1"));
+    }
+
+    #[test]
+    fn summary_lines_includes_cli_context_name() {
+        let home = PathBuf::from("/home/u");
+        let config_json = r#"{"currentContext":"colima"}"#;
+        let meta = r#"{
+            "Name":"colima",
+            "Endpoints":{"docker":{"Host":"unix:///home/u/.colima/default/docker.sock"}}
+        }"#;
+        let meta_dir = home.join(".docker/contexts/meta/abc");
+        let env = FakeEnv::new()
+            .with_home(&home)
+            .with_file(&home.join(".docker/config.json"), config_json)
+            .with_dir(&home.join(".docker/contexts/meta"), vec![meta_dir.clone()])
+            .with_file(&meta_dir.join("meta.json"), meta);
+        let lines = resolve_endpoint(&cfg_auto(), &env).summary_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("docker context (colima)")),
+            "expected context name in summary, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn summary_lines_includes_probe_name() {
+        let home = PathBuf::from("/home/u");
+        let colima = home.join(".colima/default/docker.sock");
+        let env = FakeEnv::new().with_home(&home).with_existing(&colima);
+        let lines = resolve_endpoint(&cfg_auto(), &env).summary_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("probe (colima)")),
+            "expected probe label in summary, got: {:?}",
+            lines
+        );
     }
 }
