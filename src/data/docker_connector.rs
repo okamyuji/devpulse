@@ -122,7 +122,10 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     if let Some(rest) = raw.strip_prefix("npipe://") {
         return Some(DockerEndpoint::NamedPipe(rest.to_string()));
     }
-    if Path::new(raw).is_absolute() {
+    // Unix-style leading '/' OR the host's own notion of absolute paths:
+    // treat both as a Unix socket path so bare `/var/run/docker.sock` works
+    // even on Windows hosts (WSL-adjacent setups, cross-compile scenarios).
+    if raw.starts_with('/') || Path::new(raw).is_absolute() {
         return Some(DockerEndpoint::UnixSocket(PathBuf::from(raw)));
     }
     None

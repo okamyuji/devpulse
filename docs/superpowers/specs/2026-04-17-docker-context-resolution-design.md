@@ -126,8 +126,10 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 
 ### プラットフォーム上の注意
 
-- `docker.socket_path` のパース: `unix://`, `http(s)://`, `npipe://`, `tcp://` のスキーム付き URL に加え、`Path::is_absolute()` を満たす絶対パスを Unix socket として扱う
-- Windows: Unix socket は基本的に使えないので、`npipe://` URL または `tcp://` URL を使うことを推奨。`C:\...` 形式の絶対パスは Unix socket として扱われるため、connect 時にエラーになる
+- `docker.socket_path` のパース: `unix://`, `http(s)://`, `npipe://`, `tcp://` のスキーム付き URL に加え、次のいずれかを満たす bare path は Unix socket として扱う:
+  - 先頭が `/`（Unix-style の絶対パス、ホスト OS を問わず受理）
+  - `Path::is_absolute()` を満たす（ホスト OS ルールの絶対パス）
+- Windows: Unix socket は基本的に使えないため `npipe://` / `tcp://` URL の利用を推奨。`/var/run/docker.sock` のような Unix 形式のパスを渡した場合はパースは成功するが connect 時に失敗する（`C:\...` 形式も同様）
 
 ### UI 変更
 
