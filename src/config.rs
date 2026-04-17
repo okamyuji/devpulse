@@ -30,6 +30,14 @@ pub struct PortsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DockerConfig {
+    /// Docker daemon endpoint. Accepted values (leading/trailing whitespace
+    /// is trimmed; the string `"auto"` is matched case-insensitively):
+    ///
+    /// - `"auto"` (default): auto-detect via `DOCKER_HOST`, the Docker CLI
+    ///   context, and well-known socket probes
+    /// - scheme URL: `unix://...`, `http(s)://...`, `tcp://...`, `npipe://...`
+    /// - bare absolute Unix socket path, e.g. `/var/run/docker.sock`
+    /// - bare Windows named-pipe path, e.g. `\\.\pipe\docker_engine`
     pub socket_path: String,
     pub show_stopped: bool,
 }

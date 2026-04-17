@@ -84,6 +84,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             filter_text,
             is_focused: app.active_panel == Panel::Docker,
             is_available: app.docker_available,
+            context_name: app.docker_context_name.as_deref(),
+            resolution_summary: &app.docker_resolution_summary,
         };
         frame.render_widget(docker_panel, docker_area);
     }

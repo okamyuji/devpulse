@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::data::docker::ContainerInfo;
 #[cfg(not(test))]
 use crate::data::docker::{BollardDockerSource, DockerSource};
+use crate::data::docker_connector::DockerEndpoint;
 use crate::data::log_collector;
 use crate::data::logs::{LogBuffer, LogEntry};
 use crate::data::ports::{PortEntry, SystemPortScanner};
@@ -138,6 +139,9 @@ pub struct App {
     pub log_buffer: LogBuffer,
     pub docker_containers: Vec<ContainerInfo>,
     pub docker_available: bool,
+    pub docker_context_name: Option<String>,
+    pub docker_resolution_summary: Vec<String>,
+    pub docker_endpoint: Option<DockerEndpoint>,
     // Actions
     pub pending_action: Option<Action>,
     pub confirm_message: String,
@@ -175,11 +179,23 @@ impl App {
         let log_capacity = config.logs.buffer_lines;
         let tail_follow = config.logs.tail_follow;
         #[cfg(not(test))]
-        let docker_source = BollardDockerSource::new();
+        let docker_source = BollardDockerSource::new(&config.docker);
         #[cfg(not(test))]
         let docker_available = docker_source.is_available();
+        #[cfg(not(test))]
+        let docker_context_name = docker_source.context_name().map(|s| s.to_string());
+        #[cfg(not(test))]
+        let docker_resolution_summary = docker_source.report().summary_lines();
+        #[cfg(not(test))]
+        let docker_endpoint = docker_source.endpoint().cloned();
         #[cfg(test)]
         let docker_available = false;
+        #[cfg(test)]
+        let docker_context_name: Option<String> = None;
+        #[cfg(test)]
+        let docker_resolution_summary: Vec<String> = Vec::new();
+        #[cfg(test)]
+        let docker_endpoint: Option<DockerEndpoint> = None;
 
         Self {
             config,
@@ -199,6 +215,9 @@ impl App {
             log_buffer: LogBuffer::new(log_capacity),
             docker_containers: Vec::new(),
             docker_available,
+            docker_context_name,
+            docker_resolution_summary,
+            docker_endpoint,
             pending_action: None,
             confirm_message: String::new(),
             log_filter: FilterState::new(),
@@ -358,6 +377,7 @@ impl App {
     pub fn start_log_collection(&mut self) {
         let rx = log_collector::spawn_log_collectors(
             &self.config.logs.sources,
+            self.docker_endpoint.clone(),
             self.config.logs.buffer_lines,
         );
         self.log_rx = Some(rx);
