@@ -122,6 +122,12 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     if let Some(rest) = raw.strip_prefix("npipe://") {
         return Some(DockerEndpoint::NamedPipe(rest.to_string()));
     }
+    // Bare Windows named-pipe path (e.g. `\\.\pipe\docker_engine`) must come
+    // before the generic absolute-path check so it's not misclassified as a
+    // Unix socket.
+    if raw.starts_with(r"\\.\pipe\") {
+        return Some(DockerEndpoint::NamedPipe(raw.to_string()));
+    }
     // Unix-style leading '/' OR the host's own notion of absolute paths:
     // treat both as a Unix socket path so bare `/var/run/docker.sock` works
     // even on Windows hosts (WSL-adjacent setups, cross-compile scenarios).
@@ -146,6 +152,11 @@ fn probe_candidates(home: &Path, xdg_runtime: Option<&Path>) -> Vec<(&'static st
 }
 
 const DEFAULT_UNIX_SOCKET: &str = "/var/run/docker.sock";
+
+/// Connection timeout for the Docker daemon. Kept short because this is a
+/// local-first TUI: on a healthy machine the socket answers in milliseconds,
+/// and we don't want the UI to stall for two minutes when the daemon is down.
+const CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Resolve the active Docker endpoint using the documented priority order.
 pub fn resolve_endpoint<E: Env>(cfg: &DockerConfig, env: &E) -> ResolutionReport {
@@ -294,19 +305,19 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker> {
             let s = p.to_str().ok_or_else(|| anyhow!("non-utf8 socket path"))?;
             Ok(bollard::Docker::connect_with_unix(
                 s,
-                120,
+                CONNECT_TIMEOUT_SECS,
                 bollard::API_DEFAULT_VERSION,
             )?)
         }
         DockerEndpoint::Http(url) => Ok(bollard::Docker::connect_with_http(
             url,
-            120,
+            CONNECT_TIMEOUT_SECS,
             bollard::API_DEFAULT_VERSION,
         )?),
         #[cfg(windows)]
         DockerEndpoint::NamedPipe(pipe) => Ok(bollard::Docker::connect_with_named_pipe(
             pipe,
-            120,
+            CONNECT_TIMEOUT_SECS,
             bollard::API_DEFAULT_VERSION,
         )?),
         #[cfg(not(windows))]
@@ -436,6 +447,22 @@ mod tests {
     fn parse_rejects_empty_and_relative() {
         assert_eq!(parse_endpoint(""), None);
         assert_eq!(parse_endpoint("relative/path"), None);
+    }
+
+    #[test]
+    fn parse_bare_windows_named_pipe() {
+        assert_eq!(
+            parse_endpoint(r"\\.\pipe\docker_engine"),
+            Some(DockerEndpoint::NamedPipe(r"\\.\pipe\docker_engine".into()))
+        );
+    }
+
+    #[test]
+    fn parse_npipe_url_still_works() {
+        assert_eq!(
+            parse_endpoint(r"npipe:////./pipe/docker_engine"),
+            Some(DockerEndpoint::NamedPipe(r"//./pipe/docker_engine".into()))
+        );
     }
 
     #[test]
