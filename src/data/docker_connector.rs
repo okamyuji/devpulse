@@ -34,6 +34,7 @@ pub struct ResolvedEndpoint {
 pub struct ResolutionReport {
     pub tried: Vec<(EndpointSource, DockerEndpoint)>,
     pub resolved: Option<ResolvedEndpoint>,
+    pub warnings: Vec<String>,
 }
 
 impl ResolutionReport {
@@ -41,6 +42,9 @@ impl ResolutionReport {
         let mut out = Vec::new();
         for (src, ep) in &self.tried {
             out.push(format!("{}: {}", source_label(src), endpoint_label(ep)));
+        }
+        for w in &self.warnings {
+            out.push(format!("! {}", w));
         }
         out
     }
@@ -159,14 +163,22 @@ pub fn resolve_endpoint<E: Env>(cfg: &DockerConfig, env: &E) -> ResolutionReport
 
     // 2. config.toml socket_path
     if cfg.socket_path != "auto" && !cfg.socket_path.is_empty() {
-        if let Some(ep) = parse_endpoint(&cfg.socket_path) {
-            report.tried.push((EndpointSource::Config, ep.clone()));
-            report.resolved = Some(ResolvedEndpoint {
-                endpoint: ep,
-                source: EndpointSource::Config,
-                context_name: None,
-            });
-            return report;
+        match parse_endpoint(&cfg.socket_path) {
+            Some(ep) => {
+                report.tried.push((EndpointSource::Config, ep.clone()));
+                report.resolved = Some(ResolvedEndpoint {
+                    endpoint: ep,
+                    source: EndpointSource::Config,
+                    context_name: None,
+                });
+                return report;
+            }
+            None => {
+                report.warnings.push(format!(
+                    "config.toml docker.socket_path is not a valid endpoint: {}",
+                    cfg.socket_path
+                ));
+            }
         }
     }
 
@@ -225,13 +237,19 @@ pub fn resolve_endpoint<E: Env>(cfg: &DockerConfig, env: &E) -> ResolutionReport
 }
 
 fn resolve_cli_context<E: Env>(home: &Path, env: &E) -> Option<(String, DockerEndpoint)> {
-    let config_path = home.join(".docker/config.json");
-    if !env.path_exists(&config_path) {
-        return None;
-    }
-    let content = env.read_to_string(&config_path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let current = value.get("currentContext")?.as_str()?.to_string();
+    // Docker CLI priority: DOCKER_CONTEXT env var > ~/.docker/config.json currentContext.
+    let current = match env.var("DOCKER_CONTEXT") {
+        Some(v) if !v.is_empty() => v,
+        _ => {
+            let config_path = home.join(".docker/config.json");
+            if !env.path_exists(&config_path) {
+                return None;
+            }
+            let content = env.read_to_string(&config_path).ok()?;
+            let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+            value.get("currentContext")?.as_str()?.to_string()
+        }
+    };
     if current.is_empty() || current == "default" {
         return None;
     }
@@ -592,6 +610,57 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("probe (colima)")),
             "expected probe label in summary, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn docker_context_env_var_overrides_config_json() {
+        // DOCKER_CONTEXT points at "colima" even though config.json has a different currentContext.
+        let home = PathBuf::from("/home/u");
+        let config_json = r#"{"currentContext":"desktop-linux"}"#;
+        let meta = r#"{
+            "Name":"colima",
+            "Endpoints":{"docker":{"Host":"unix:///home/u/.colima/default/docker.sock"}}
+        }"#;
+        let meta_dir = home.join(".docker/contexts/meta/abc");
+        let env = FakeEnv::new()
+            .with_home(&home)
+            .with_var("DOCKER_CONTEXT", "colima")
+            .with_file(&home.join(".docker/config.json"), config_json)
+            .with_dir(&home.join(".docker/contexts/meta"), vec![meta_dir.clone()])
+            .with_file(&meta_dir.join("meta.json"), meta);
+        let resolved = resolve_endpoint(&cfg_auto(), &env).resolved.unwrap();
+        assert_eq!(resolved.source, EndpointSource::CliContext("colima".into()));
+    }
+
+    #[test]
+    fn invalid_config_socket_path_is_recorded_and_falls_through() {
+        let cfg = DockerConfig {
+            socket_path: "mydocker.sock".into(), // relative path, not parseable
+            show_stopped: true,
+        };
+        let home = PathBuf::from("/home/u");
+        let colima = home.join(".colima/default/docker.sock");
+        let env = FakeEnv::new().with_home(&home).with_existing(&colima);
+        let report = resolve_endpoint(&cfg, &env);
+        // Falls through to the probe.
+        let resolved = report.resolved.as_ref().unwrap();
+        assert_eq!(resolved.source, EndpointSource::Probe("colima".into()));
+        // And the bad config is surfaced in warnings.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("mydocker.sock") && w.contains("socket_path")),
+            "expected warning about socket_path, got: {:?}",
+            report.warnings
+        );
+        // Summary includes the warning with ! prefix.
+        let lines = report.summary_lines();
+        assert!(
+            lines.iter().any(|l| l.starts_with("! ")),
+            "expected warning in summary lines, got: {:?}",
             lines
         );
     }

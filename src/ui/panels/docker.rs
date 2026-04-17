@@ -46,9 +46,19 @@ impl<'a> Widget for DockerPanel<'a> {
                 return;
             }
             let header = "No Docker daemon found. Tried:";
-            if inner.width as usize >= header.len() {
-                buf.set_string(inner.x, inner.y, header, Style::default().fg(Color::Red));
-            }
+            let short = "Docker not found";
+            let header_text = if inner.width as usize >= header.len() {
+                header
+            } else {
+                short
+            };
+            buf.set_stringn(
+                inner.x,
+                inner.y,
+                header_text,
+                inner.width as usize,
+                Style::default().fg(Color::Red),
+            );
             let max_rows = inner.height.saturating_sub(1) as usize;
             for (i, line) in self.resolution_summary.iter().take(max_rows).enumerate() {
                 let row_y = inner.y + 1 + i as u16;

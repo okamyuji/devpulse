@@ -63,13 +63,21 @@ pub struct BollardDockerSource {
 
 impl BollardDockerSource {
     pub fn new(cfg: &DockerConfig) -> Self {
-        let report = docker_connector::resolve_endpoint(cfg, &docker_connector::RealEnv);
+        let mut report = docker_connector::resolve_endpoint(cfg, &docker_connector::RealEnv);
         let (client, context_name, endpoint) = match report.resolved.as_ref() {
-            Some(r) => (
-                docker_connector::connect(&r.endpoint).ok(),
-                r.context_name.clone(),
-                Some(r.endpoint.clone()),
-            ),
+            Some(r) => {
+                let ep = r.endpoint.clone();
+                let ctx = r.context_name.clone();
+                match docker_connector::connect(&r.endpoint) {
+                    Ok(c) => (Some(c), ctx, Some(ep)),
+                    Err(e) => {
+                        let msg = format!("failed to connect to Docker: {}", e);
+                        tracing::warn!("{}", msg);
+                        report.warnings.push(msg);
+                        (None, ctx, Some(ep))
+                    }
+                }
+            }
             None => (None, None, None),
         };
         Self {

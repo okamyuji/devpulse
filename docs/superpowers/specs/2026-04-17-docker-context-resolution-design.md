@@ -65,11 +65,15 @@ pub struct ResolvedEndpoint {
 
 #[derive(Debug)]
 pub struct ResolutionReport {
-    pub tried: Vec<(EndpointSource, DockerEndpoint, Option<String>)>,
+    pub tried: Vec<(EndpointSource, DockerEndpoint)>,
     pub resolved: Option<ResolvedEndpoint>,
+    pub warnings: Vec<String>,
 }
 
-pub fn resolve_endpoint(cfg: &DockerConfig) -> ResolutionReport;
+pub trait Env { /* env var / fs accessors, injectable for tests */ }
+pub struct RealEnv;
+
+pub fn resolve_endpoint<E: Env>(cfg: &DockerConfig, env: &E) -> ResolutionReport;
 pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 ```
 
@@ -82,7 +86,8 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
    - `"auto"` または空ならスキップ
    - 絶対パス or `unix://` / `tcp://` URL を許可
 3. **Docker CLI context**
-   - `$HOME/.docker/config.json` を読み `currentContext` を取得
+   - `DOCKER_CONTEXT` 環境変数が優先（Docker CLI と同じ挙動）
+   - 未設定時は `$HOME/.docker/config.json` を読み `currentContext` を取得
    - 空 or `"default"` の場合はスキップ
    - `$HOME/.docker/contexts/meta/` 配下の各 `meta.json` を走査し、`Name == currentContext` の `Endpoints.docker.Host` を採用
 4. **既知ソケットのプローブ**（最初に見つかったもの）
@@ -97,24 +102,32 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 
 ### 接続フロー
 
-```
+```text
 ┌─ App::new(config) ─────────────────────────────────────────┐
-│  let report = docker_connector::resolve_endpoint(&cfg);    │
-│  let (client, context_name) = match report.resolved {      │
-│      Some(r) => (connect(&r.endpoint).ok(), r.context_name)│
-│      None    => (None, None),                              │
-│  };                                                         │
-│  BollardDockerSource { client, context_name }              │
+│  let report = resolve_endpoint(&cfg, &RealEnv);            │
+│  match report.resolved {                                   │
+│      Some(r) => connect(&r.endpoint) and capture errors    │
+│                  → BollardDockerSource { client, endpoint, │
+│                                          context_name,     │
+│                                          report }          │
+│      None    => record default attempt in report           │
+│  }                                                         │
 └────────────────────────────────────────────────────────────┘
 ```
 
-- `BollardDockerSource` に `context_name: Option<String>` を保持して UI に渡す
-- `log_collector::stream_docker_logs` も `resolve_endpoint` を経由させる（重複接続ロジックを排除）
+- `BollardDockerSource` は `client`, `endpoint`, `context_name`, `report` を保持
+- `App::new` は `docker_source.endpoint()` を 1 回だけ取り出し、`log_collector::spawn_log_collectors` に `Option<DockerEndpoint>` として渡す（resolve は 1 回のみ）
 
 ### エラー取り扱い
 
-- 解決に成功したが接続でエラーが出た場合 → `client = None`、`docker_available = false`
-- UI はパネルに `No Docker daemon found` とともに ResolutionReport の試行サマリを表示
+- 解決に成功したが接続でエラーが出た場合 → `client = None`、`docker_available = false`、`tracing::warn!` でログし `report.warnings` に記録
+- `config.socket_path` が parse できない値の場合 → `report.warnings` に記録し、次の優先順位（CLI context）にフォールスルー
+- UI はパネルに `No Docker daemon found. Tried:` ヘッダとともに試行エンドポイント一覧 + warnings を表示（狭いパネルでは `Docker not found` にフォールバック）
+
+### プラットフォーム上の注意
+
+- `docker.socket_path` のパース: `unix://`, `http(s)://`, `npipe://`, `tcp://` のスキーム付き URL に加え、`Path::is_absolute()` を満たす絶対パスを Unix socket として扱う
+- Windows: Unix socket は基本的に使えないので、`npipe://` URL または `tcp://` URL を使うことを推奨。`C:\...` 形式の絶対パスは Unix socket として扱われるため、connect 時にエラーになる
 
 ### UI 変更
 
