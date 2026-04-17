@@ -142,7 +142,7 @@ impl Env for RealEnv {
 ///
 /// - `unix:///path/to/docker.sock` → [`DockerEndpoint::UnixSocket`]
 /// - `tcp://host:port` → [`DockerEndpoint::Http`] (normalized to `http://`)
-/// - `http://...` / `https://...` → [`DockerEndpoint::Http`]
+/// - `http://...` → [`DockerEndpoint::Http`]
 /// - `npipe://...` → [`DockerEndpoint::NamedPipe`] (slashes normalized
 ///   to backslashes for Windows API compatibility)
 /// - bare `\\.\pipe\...` → [`DockerEndpoint::NamedPipe`]
@@ -150,7 +150,10 @@ impl Env for RealEnv {
 ///   [`DockerEndpoint::UnixSocket`]
 ///
 /// Leading/trailing whitespace is trimmed. Returns `None` for empty,
-/// relative, or otherwise unrecognized input.
+/// relative, or otherwise unrecognized input. `https://` URLs are
+/// *explicitly rejected* (return `None`) — DevPulse does not yet wire up
+/// `bollard::connect_with_ssl` + `DOCKER_CERT_PATH`, and treating
+/// `https://` as plain HTTP would silently send requests to a TLS port.
 pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -164,8 +167,15 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
     if let Some(rest) = raw.strip_prefix("tcp://") {
         return Some(DockerEndpoint::Http(format!("http://{}", rest)));
     }
-    if raw.starts_with("http://") || raw.starts_with("https://") {
+    if raw.starts_with("http://") {
         return Some(DockerEndpoint::Http(raw.to_string()));
+    }
+    // HTTPS with client-cert auth (DOCKER_CERT_PATH) requires bollard's
+    // connect_with_ssl API, which is not wired up here. Silently treating
+    // https:// as plain HTTP would send requests to a TLS port unencrypted,
+    // so reject it — the caller surfaces a specific warning.
+    if raw.starts_with("https://") {
+        return None;
     }
     if let Some(rest) = raw.strip_prefix("npipe://") {
         // Windows named pipes require backslash separators; Docker URLs are
@@ -225,16 +235,32 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 pub fn resolve_endpoint<E: Env>(cfg: &DockerConfig, env: &E) -> ResolutionReport {
     let mut report = ResolutionReport::default();
 
-    // 1. DOCKER_HOST
+    // 1. DOCKER_HOST (highest priority; record warnings on malformed input so
+    //    users aren't silently bounced to a lower-priority source).
     if let Some(raw) = env.var("DOCKER_HOST") {
-        if let Some(ep) = parse_endpoint(&raw) {
-            report.tried.push((EndpointSource::EnvVar, ep.clone()));
-            report.resolved = Some(ResolvedEndpoint {
-                endpoint: ep,
-                source: EndpointSource::EnvVar,
-                context_name: None,
-            });
-            return report;
+        match parse_endpoint(&raw) {
+            Some(ep) => {
+                report.tried.push((EndpointSource::EnvVar, ep.clone()));
+                report.resolved = Some(ResolvedEndpoint {
+                    endpoint: ep,
+                    source: EndpointSource::EnvVar,
+                    context_name: None,
+                });
+                return report;
+            }
+            None => {
+                let msg = if raw.starts_with("https://") {
+                    format!(
+                        "DOCKER_HOST=https:// TLS endpoints are not supported yet ({}); \
+                         set DOCKER_HOST to a unix://, http://, or tcp:// endpoint instead",
+                        raw
+                    )
+                } else {
+                    format!("DOCKER_HOST is not a valid endpoint: {}", raw)
+                };
+                tracing::warn!("{}", msg);
+                report.warnings.push(msg);
+            }
         }
     }
 
@@ -524,11 +550,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_https_url_preserved() {
-        assert_eq!(
-            parse_endpoint("https://docker.example:2376"),
-            Some(DockerEndpoint::Http("https://docker.example:2376".into()))
-        );
+    fn parse_https_url_rejected_until_tls_supported() {
+        // https:// must not be silently treated as plain HTTP. TLS support is
+        // a future extension; for now we return None and let the caller warn.
+        assert_eq!(parse_endpoint("https://docker.example:2376"), None);
     }
 
     #[test]
@@ -558,6 +583,54 @@ mod tests {
         assert_eq!(
             parse_endpoint(r"npipe:////./pipe/docker_engine"),
             Some(DockerEndpoint::NamedPipe(r"\\.\pipe\docker_engine".into()))
+        );
+    }
+
+    #[test]
+    fn env_var_invalid_is_recorded_in_warnings_and_falls_through() {
+        // DOCKER_HOST is the highest-priority input, so a typo should be
+        // surfaced in the report instead of silently dropping us into probe
+        // resolution with no explanation.
+        let home = PathBuf::from("/home/u");
+        let colima = home.join(".colima/default/docker.sock");
+        let env = FakeEnv::new()
+            .with_home(&home)
+            .with_var("DOCKER_HOST", "docker.sock") // relative, not parseable
+            .with_existing(&colima);
+        let report = resolve_endpoint(&cfg_auto(), &env);
+        // Falls through to probe.
+        assert_eq!(
+            report.resolved.as_ref().unwrap().source,
+            EndpointSource::Probe("colima".into())
+        );
+        // And the bad value is surfaced.
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("DOCKER_HOST") && w.contains("docker.sock")),
+            "expected DOCKER_HOST warning, got: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn env_var_https_is_rejected_with_tls_hint() {
+        // https:// is deliberately unsupported; the warning tells the user
+        // why and what to use instead rather than silently falling through.
+        let home = PathBuf::from("/home/u");
+        let env = FakeEnv::new()
+            .with_home(&home)
+            .with_var("DOCKER_HOST", "https://docker.example:2376");
+        let report = resolve_endpoint(&cfg_auto(), &env);
+        assert!(report.resolved.is_none());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("TLS") && w.contains("https://")),
+            "expected TLS-specific warning, got: {:?}",
+            report.warnings
         );
     }
 

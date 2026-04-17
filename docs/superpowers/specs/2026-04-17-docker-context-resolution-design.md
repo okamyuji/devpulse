@@ -31,7 +31,7 @@ DevPulse は起動時に `bollard::Docker::connect_with_local_defaults()` のみ
 - 複数 Docker デーモンの同時集約（マルチコンテキスト表示）
 - 起動中の動的な context 再解決・リコネクト
 - Windows の npipe: `\\.\pipe\...` の bare path / `npipe://` URL のパースと connect までは実装（ただし実機動作検証は非対象）
-- TLS 証明書付き `tcp://` エンドポイントの詳細設定（`tcp://` は常に `http://` に正規化、TLS が必要なら明示的に `https://` を使う）
+- TLS 対応全般（`https://` は明示的に拒否。`tcp://` は常に `http://` に正規化。将来 `connect_with_ssl` + `DOCKER_CERT_PATH` として対応予定）
 - 接続タイムアウトの configurable 化（YAGNI。`CONNECT_TIMEOUT_SECS = 30` ハードコード）
 - SHA-256 ハッシュによる `contexts/meta/` の O(1) lookup（通常 context 数が 1〜3 個で線形走査で十分、依存追加を避ける）
 
@@ -128,6 +128,8 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 
 | 状況 | 対応 |
 |---|---|
+| `DOCKER_HOST` 無効値（`docker.sock` 等） | `warnings` に記録してフォールスルー（最優先入力なので silent 破棄しない） |
+| `DOCKER_HOST=https://...` | TLS 非対応専用メッセージで `warnings` 記録 + フォールスルー |
 | `connect()` が失敗（後段） | `tracing::warn` + `report.warnings` に push。`client = None` / `docker_available = false` |
 | `config.socket_path` が parse 不可 | `warnings` に記録してフォールスルー |
 | `~/.docker/config.json` が破損 JSON | `resolve_cli_context` が `None` を返してフォールスルー |
@@ -148,7 +150,8 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
   - `Path::is_absolute()` を満たす（ホスト OS ルールの絶対パス）
 - Windows: Unix socket は基本的に使えないため `npipe://` / `tcp://` URL の利用を推奨。`/var/run/docker.sock` のような Unix 形式のパスを渡した場合はパースは成功するが connect 時に失敗する（`C:\...` 形式も同様）
 - `npipe://` 経由で渡された path は `/` → `\` に正規化してから `bollard::connect_with_named_pipe` に渡す（Windows API 互換のため）
-- `tcp://` は常に `http://` に正規化される（TLS は現状サポート外）。TLS 経由で接続する場合は `DOCKER_HOST=https://...` を直接指定する必要がある
+- `tcp://` は常に `http://` に正規化される
+- **TLS 非サポート**: `https://` は `parse_endpoint` で明示的に拒否する（`None` を返す）。`DOCKER_HOST=https://...` が渡された場合は `ResolutionReport.warnings` に TLS 非対応である旨の警告を記録し、次の優先順位に fallthrough する。silent に plain HTTP として扱うと TLS ポートに平文送信する危険があるため拒否する方針。将来 `bollard::connect_with_ssl` + `DOCKER_CERT_PATH` 対応として拡張予定
 
 ### UI 変更
 
@@ -180,10 +183,12 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 **入力正規化**
 
 - `parse_endpoint` が `tcp://` を `http://` に正規化
+- `parse_endpoint` が `https://` を明示的に拒否（TLS 未対応）
 - `parse_endpoint` が `npipe://` の `/` を `\` に正規化
 - `parse_endpoint` が `\\.\pipe\` の bare path を NamedPipe として認識（Unix socket 判定より優先）
 - `parse_endpoint` が `/var/run/docker.sock` を Unix socket と認識（host OS を問わず）
 - `socket_path = "  AUTO  "` などは auto 扱い（trim + case-insensitive）
+- `DOCKER_HOST` の無効値は `warnings` に記録してフォールスルー（`https://` は TLS 非対応専用メッセージ）
 
 **エッジケース**
 
