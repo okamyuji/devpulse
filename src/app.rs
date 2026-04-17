@@ -384,13 +384,27 @@ impl App {
     }
 
     /// Drain any pending log entries from background collectors into the buffer.
+    /// Drain buffered log entries into the log buffer for this tick.
+    ///
+    /// Capped at [`Self::MAX_LOG_DRAIN_PER_TICK`] entries per call so a
+    /// high-volume producer (e.g. dozens of Colima containers all emitting
+    /// logs) can't starve the event loop. Any remaining entries are
+    /// processed on the next iteration.
     pub fn drain_logs(&mut self) {
         if let Some(rx) = &mut self.log_rx {
-            while let Ok(entry) = rx.try_recv() {
-                self.log_buffer.push(entry);
+            for _ in 0..Self::MAX_LOG_DRAIN_PER_TICK {
+                match rx.try_recv() {
+                    Ok(entry) => self.log_buffer.push(entry),
+                    Err(_) => break,
+                }
             }
         }
     }
+
+    /// Maximum log entries drained per event-loop iteration. Tuned to be
+    /// well under a millisecond of work so keyboard input is always serviced
+    /// promptly even when many containers produce logs concurrently.
+    pub const MAX_LOG_DRAIN_PER_TICK: usize = 512;
 
     /// Refresh live data from system sources (ports, processes, docker)
     pub fn tick(&mut self) {
@@ -659,6 +673,35 @@ mod tests {
         // log_rx is None in test mode; should not panic
         app.drain_logs();
         assert_eq!(app.log_buffer.len(), 0);
+    }
+
+    #[test]
+    fn test_drain_logs_is_capped_per_tick() {
+        // A flood of log entries (e.g. dozens of Colima containers all
+        // chattering) must not stall the event loop: drain_logs stops
+        // after MAX_LOG_DRAIN_PER_TICK entries and leaves the rest for
+        // the next iteration.
+        use crate::data::logs::{LogEntry, LogLevel};
+        let mut app = test_app();
+        let flood = App::MAX_LOG_DRAIN_PER_TICK * 3;
+        let (tx, rx) = tokio::sync::mpsc::channel(flood + 16);
+        app.log_rx = Some(rx);
+        for i in 0..flood {
+            tx.try_send(LogEntry {
+                timestamp: i as u64,
+                source: "test".into(),
+                level: LogLevel::Info,
+                message: format!("entry{}", i),
+            })
+            .unwrap();
+        }
+
+        app.drain_logs();
+        assert_eq!(app.log_buffer.len(), App::MAX_LOG_DRAIN_PER_TICK);
+
+        // Subsequent calls continue draining the backlog.
+        app.drain_logs();
+        assert_eq!(app.log_buffer.len(), App::MAX_LOG_DRAIN_PER_TICK * 2);
     }
 
     #[test]

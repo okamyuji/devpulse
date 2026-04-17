@@ -126,10 +126,13 @@ async fn main() -> anyhow::Result<()> {
         // Draw
         terminal.draw(|f| ui::draw(f, &app))?;
 
-        // Poll events
-        let timeout = tick_rate
+        // Poll events. Cap at 50ms so the loop also services log drains
+        // and scheduled ticks even when the user isn't typing — without
+        // this the loop could block up to tick_rate (seconds) on idle.
+        let until_next_tick = tick_rate
             .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
+            .unwrap_or(Duration::ZERO);
+        let timeout = std::cmp::min(until_next_tick, Duration::from_millis(50));
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
