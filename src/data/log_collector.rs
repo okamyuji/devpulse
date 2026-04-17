@@ -158,12 +158,10 @@ fn parse_docker_log_output(output: &bollard::container::LogOutput) -> (LogLevel,
 /// Try to detect log level from common log format patterns.
 fn detect_log_level_from_text(text: &str) -> Option<LogLevel> {
     let upper = text.to_uppercase();
-    // Check for common log level indicators near the beginning
-    let prefix = if upper.len() > 80 {
-        &upper[..80]
-    } else {
-        &upper
-    };
+    // Check for common log level indicators near the beginning.
+    // Slice by *char boundary* — a byte slice would panic on multi-byte
+    // characters (Japanese, emoji, etc.) in container logs.
+    let prefix = truncate_char_boundary(&upper, 80);
     if prefix.contains("ERROR") || prefix.contains("FATAL") || prefix.contains("PANIC") {
         Some(LogLevel::Error)
     } else if prefix.contains("WARN") {
@@ -173,6 +171,19 @@ fn detect_log_level_from_text(text: &str) -> Option<LogLevel> {
     } else {
         None
     }
+}
+
+/// Return the longest prefix of `s` whose byte length is at most `max_bytes`,
+/// stopping at the nearest UTF-8 character boundary.
+fn truncate_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Watch file logs using the notify crate for file change detection.
@@ -347,6 +358,36 @@ mod tests {
     #[test]
     fn test_detect_log_level_none() {
         assert!(detect_log_level_from_text("just a plain message").is_none());
+    }
+
+    #[test]
+    fn test_detect_log_level_multibyte_prefix_does_not_panic() {
+        // Regression: panicked with
+        // "byte index 80 is not a char boundary; it is inside 'を'"
+        // when a Japanese log line (Colima container logs) happened to
+        // straddle the 80-byte truncation point.
+        let msg = "ログ出力テスト：".repeat(20) + " ERROR occurred";
+        let lvl = detect_log_level_from_text(&msg);
+        // We don't care whether ERROR is found — only that it doesn't panic
+        // and that a level (or None) is returned.
+        let _ = lvl;
+    }
+
+    #[test]
+    fn test_truncate_char_boundary_keeps_valid_utf8() {
+        // "を" is a 3-byte char (E3 82 92). Truncating at byte 79 would
+        // split it; the helper must back off to the previous boundary.
+        let s = "a".repeat(78) + "を" + "bc"; // len = 78 + 3 + 2 = 83
+        let out = truncate_char_boundary(&s, 80);
+        // 80 bytes splits the multibyte; expect truncation back to byte 78.
+        assert_eq!(out.len(), 78);
+        assert!(out.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn test_truncate_char_boundary_shorter_than_max() {
+        let s = "short";
+        assert_eq!(truncate_char_boundary(s, 80), s);
     }
 
     #[test]
