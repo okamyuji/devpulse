@@ -30,8 +30,10 @@ DevPulse は起動時に `bollard::Docker::connect_with_local_defaults()` のみ
 
 - 複数 Docker デーモンの同時集約（マルチコンテキスト表示）
 - 起動中の動的な context 再解決・リコネクト
-- Windows の npipe 対応（最低限パースできるが優先検証対象ではない）
-- TLS 証明書付き tcp エンドポイントの詳細設定（将来拡張）
+- Windows の npipe: `\\.\pipe\...` の bare path / `npipe://` URL のパースと connect までは実装（ただし実機動作検証は非対象）
+- TLS 証明書付き `tcp://` エンドポイントの詳細設定（`tcp://` は常に `http://` に正規化、TLS が必要なら明示的に `https://` を使う）
+- 接続タイムアウトの configurable 化（YAGNI。`CONNECT_TIMEOUT_SECS = 30` ハードコード）
+- SHA-256 ハッシュによる `contexts/meta/` の O(1) lookup（通常 context 数が 1〜3 個で線形走査で十分、依存追加を避ける）
 
 ## 設計
 
@@ -83,46 +85,60 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
    - `unix://`, `tcp://`, `npipe://` をパース → `DockerEndpoint`
    - 未設定ならスキップ
 2. **`config.docker.socket_path`**
-   - `"auto"` または空ならスキップ
-   - 絶対パス or `unix://` / `tcp://` URL を許可
+   - 値は trim され、`"auto"` と **大文字小文字を区別せず** 比較（`"AUTO"`・`"  auto  "` も自動扱い）
+   - 空または `"auto"` ならスキップ
+   - 絶対パス、`\\.\pipe\...`、`unix://` / `http(s)://` / `tcp://` / `npipe://` URL を許可
+   - parse に失敗した値は `report.warnings` に記録し、次の優先順位へフォールスルー
 3. **Docker CLI context**
    - `DOCKER_CONTEXT` 環境変数が優先（Docker CLI と同じ挙動）
    - 未設定時は `$HOME/.docker/config.json` を読み `currentContext` を取得
-   - 空 or `"default"` の場合はスキップ
-   - `$HOME/.docker/contexts/meta/` 配下の各 `meta.json` を走査し、`Name == currentContext` の `Endpoints.docker.Host` を採用
+   - 値が空または `"default"` ならスキップ
+   - `$HOME/.docker/contexts/meta/` 配下を **ソート済み順** で走査し、`Name == current` の `meta.json` から `Endpoints.docker.Host` を採用
+   - マッチした context が Docker endpoint を持たない（Kubernetes-only 等）場合は `continue` して次の候補を探す
+   - `config.json` / `meta.json` の読込失敗・JSON パースエラーは `tracing::warn` で記録しつつスキップ
 4. **既知ソケットのプローブ**（最初に見つかったもの）
    - `$HOME/.colima/default/docker.sock` — Colima
    - `$HOME/.orbstack/run/docker.sock` — OrbStack
    - `$HOME/.rd/docker.sock` — Rancher Desktop
-   - `$XDG_RUNTIME_DIR/docker.sock` — rootless（Linux）
+   - `$XDG_RUNTIME_DIR/docker.sock` — rootless（Linux、`XDG_RUNTIME_DIR` 未設定時はこの候補をスキップ）
    - `$HOME/.docker/run/docker.sock` — Docker Desktop
    - プローブは「ファイルが存在する」を条件とする（UDS の実接続まではしない）
 5. **最終フォールバック**: `/var/run/docker.sock`
-6. 全失敗時は `ResolutionReport::resolved = None` を返す
+6. 全失敗時は `ResolutionReport::resolved = None` を返し、`tried` に default を記録する
 
 ### 接続フロー
 
 ```text
 ┌─ App::new(config) ─────────────────────────────────────────┐
-│  let report = resolve_endpoint(&cfg, &RealEnv);            │
-│  match report.resolved {                                   │
-│      Some(r) => connect(&r.endpoint) and capture errors    │
-│                  → BollardDockerSource { client, endpoint, │
-│                                          context_name,     │
-│                                          report }          │
-│      None    => record default attempt in report           │
-│  }                                                         │
+│  let mut report = resolve_endpoint(&cfg, &RealEnv);        │
+│  let client = match report.resolved {                      │
+│      Some(r) => connect(&r.endpoint)                       │
+│          .inspect_err(log & push to report.warnings)       │
+│          .ok(),                                            │
+│      None => None,                                         │
+│  };                                                        │
+│  BollardDockerSource { client, report }                    │
 └────────────────────────────────────────────────────────────┘
 ```
 
-- `BollardDockerSource` は `client`, `endpoint`, `context_name`, `report` を保持
+- `BollardDockerSource` は `client` と `report` のみを保持。`endpoint()` / `context_name()` は `report.resolved` から派生して返す（state 重複なし）
 - `App::new` は `docker_source.endpoint()` を 1 回だけ取り出し、`log_collector::spawn_log_collectors` に `Option<DockerEndpoint>` として渡す（resolve は 1 回のみ）
 
 ### エラー取り扱い
 
-- 解決に成功したが接続でエラーが出た場合 → `client = None`、`docker_available = false`、`tracing::warn!` でログし `report.warnings` に記録
-- `config.socket_path` が parse できない値の場合 → `report.warnings` に記録し、次の優先順位（CLI context）にフォールスルー
-- UI はパネルに `No Docker daemon found. Tried:` ヘッダとともに試行エンドポイント一覧 + warnings を表示（狭いパネルでは `Docker not found` にフォールバック）
+| 状況 | 対応 |
+|---|---|
+| `connect()` が失敗（後段） | `tracing::warn` + `report.warnings` に push。`client = None` / `docker_available = false` |
+| `config.socket_path` が parse 不可 | `warnings` に記録してフォールスルー |
+| `~/.docker/config.json` が破損 JSON | `resolve_cli_context` が `None` を返してフォールスルー |
+| `contexts/meta/` の `meta.json` が破損 | 該当 dir を `continue` し次の dir を調べる |
+| マッチ context が Docker endpoint 無し（Kubernetes-only 等） | `continue` してフォールスルー |
+| `XDG_RUNTIME_DIR` 未設定 | rootless 候補をスキップするだけ |
+| 接続時の `connect` エラーメッセージ | `anyhow::Context` で endpoint を含めてラップ（例: `connect_with_unix(/var/run/docker.sock) failed: ...`） |
+
+- UI はパネルに `No Docker daemon found. Tried:` ヘッダと試行エンドポイント一覧 + warnings（`! ` 接頭辞）を表示
+- パネル幅が狭い場合は `Docker not found` にフォールバック
+- `BollardDockerSource::new` が connect 失敗しても `endpoint()` / `context_name()` は解決済みの値を返す（診断用）
 
 ### プラットフォーム上の注意
 
@@ -139,21 +155,44 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 - Docker パネルタイトル: `Docker` → `Docker [colima]`（context 名が取得できた場合のみ）
 - Docker 利用不可時のメッセージを現行の固定文言から、試行候補の簡易サマリ入りに差し替え
 
+### タイムアウト
+
+- `bollard::Docker::connect_with_*` は `CONNECT_TIMEOUT_SECS = 30` 秒を使用（ローカル用途として十分短く、UI が固まりにくい値）
+- configurable にはしない（YAGNI、要求が出たら追加）
+
 ## テスト戦略
 
 ### ユニットテスト（`docker_connector::tests`）
 
-テーブル駆動で以下のケースを検証:
+純粋ロジックは `Env` trait を差し替える in-memory fake `FakeEnv` で検証し、テーブル駆動 + 個別ケースで以下を網羅:
+
+**優先順位**
 
 | # | 事前状態 | 期待 source | 期待 endpoint |
 |---|---|---|---|
-| 1 | `DOCKER_HOST=tcp://1.2.3.4:2375` | EnvVar | Http |
+| 1 | `DOCKER_HOST=tcp://1.2.3.4:2375` | EnvVar | Http (`http://...` に正規化) |
 | 2 | env 未設定、`config.socket_path = "/tmp/custom.sock"` | Config | UnixSocket |
-| 3 | env/config なし、`config.json` に `currentContext=colima`、meta に Colima 定義 | CliContext("colima") | UnixSocket |
-| 4 | env/config/context なし、Colima ソケットのみ存在 | Probe("colima") | UnixSocket |
-| 5 | すべて不在 | — | resolved=None |
+| 3 | `DOCKER_CONTEXT=colima`（config.json と不一致でも env 優先） | CliContext("colima") | UnixSocket |
+| 4 | env/config なし、config.json の currentContext=colima | CliContext("colima") | UnixSocket |
+| 5 | env/config/context なし、Colima ソケットのみ存在 | Probe("colima") | UnixSocket |
+| 6 | すべて不在 | — | resolved=None、tried=[Default] |
 
-**I/O 分離:** `resolve_endpoint` は `DockerConfig` と「ファイルシステム / 環境変数アクセサ」トレイト or 関数引数を受ける純粋関数構造にし、テストでは tempdir で偽の `$HOME` / 偽 socket ファイルを差し込む。
+**入力正規化**
+
+- `parse_endpoint` が `tcp://` を `http://` に正規化
+- `parse_endpoint` が `npipe://` の `/` を `\` に正規化
+- `parse_endpoint` が `\\.\pipe\` の bare path を NamedPipe として認識（Unix socket 判定より優先）
+- `parse_endpoint` が `/var/run/docker.sock` を Unix socket と認識（host OS を問わず）
+- `socket_path = "  AUTO  "` などは auto 扱い（trim + case-insensitive）
+
+**エッジケース**
+
+- `config.socket_path` が無効値 → `warnings` に記録され、次の優先順位にフォールスルー
+- 現在 context が Docker endpoint を持たない（Kubernetes-only）→ プローブ候補にフォールスルー
+- probe で Colima > OrbStack > Rancher Desktop の優先順序が守られる
+- `XDG_RUNTIME_DIR` 未設定時 rootless 候補がスキップされる
+- `summary_lines()` が context 名 / probe 名を含む（`docker context (colima)`、`probe (colima)`）
+- `summary_lines()` が warnings を `! ` 接頭辞で出力
 
 ### 統合テスト
 

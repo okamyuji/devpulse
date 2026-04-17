@@ -54,48 +54,59 @@ pub trait DockerSource: Send + Sync {
     fn is_available(&self) -> bool;
 }
 
+/// Live Docker source backed by the `bollard` crate.
+///
+/// Resolution and connection happen once at `new()`. The resolved
+/// endpoint, context name, and resolution report are derived from the
+/// stored [`ResolutionReport`] — there is no duplicated state.
 pub struct BollardDockerSource {
     client: Option<bollard::Docker>,
-    context_name: Option<String>,
-    endpoint: Option<DockerEndpoint>,
     report: ResolutionReport,
 }
 
 impl BollardDockerSource {
+    /// Build a source using the documented resolution order.
+    ///
+    /// If resolution finds an endpoint but `bollard` fails to connect
+    /// (bad URL, unsupported scheme on the current platform, etc.), the
+    /// error is logged via `tracing::warn` and recorded in
+    /// `report.warnings` so the UI can surface it.
     pub fn new(cfg: &DockerConfig) -> Self {
         let mut report = docker_connector::resolve_endpoint(cfg, &docker_connector::RealEnv);
-        let (client, context_name, endpoint) = match report.resolved.as_ref() {
-            Some(r) => {
-                let ep = r.endpoint.clone();
-                let ctx = r.context_name.clone();
-                match docker_connector::connect(&r.endpoint) {
-                    Ok(c) => (Some(c), ctx, Some(ep)),
-                    Err(e) => {
-                        let msg = format!("failed to connect to Docker: {}", e);
-                        tracing::warn!("{}", msg);
-                        report.warnings.push(msg);
-                        (None, ctx, Some(ep))
-                    }
+        let client = match report.resolved.as_ref() {
+            Some(r) => match docker_connector::connect(&r.endpoint) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    let msg = format!("failed to connect to Docker: {}", e);
+                    tracing::warn!("{}", msg);
+                    report.warnings.push(msg);
+                    None
                 }
-            }
-            None => (None, None, None),
+            },
+            None => None,
         };
-        Self {
-            client,
-            context_name,
-            endpoint,
-            report,
-        }
+        Self { client, report }
     }
 
+    /// Human-readable context name from the resolution, if any
+    /// (e.g. `"colima"` when resolved via the Docker CLI context).
     pub fn context_name(&self) -> Option<&str> {
-        self.context_name.as_deref()
+        self.report
+            .resolved
+            .as_ref()
+            .and_then(|r| r.context_name.as_deref())
     }
 
+    /// The resolved endpoint, if resolution succeeded.
+    ///
+    /// Present even when the subsequent `bollard` connect failed — in
+    /// that case `is_available()` is false but this still reports which
+    /// endpoint was attempted.
     pub fn endpoint(&self) -> Option<&DockerEndpoint> {
-        self.endpoint.as_ref()
+        self.report.resolved.as_ref().map(|r| &r.endpoint)
     }
 
+    /// Full resolution report for diagnostics (tried candidates + warnings).
     pub fn report(&self) -> &ResolutionReport {
         &self.report
     }
