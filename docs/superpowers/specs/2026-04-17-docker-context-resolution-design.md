@@ -128,8 +128,11 @@ pub fn connect(endpoint: &DockerEndpoint) -> Result<bollard::Docker>;
 
 - `docker.socket_path` のパース: `unix://`, `http(s)://`, `npipe://`, `tcp://` のスキーム付き URL に加え、次のいずれかを満たす bare path は Unix socket として扱う:
   - 先頭が `/`（Unix-style の絶対パス、ホスト OS を問わず受理）
+  - `\\.\pipe\` で始まる（Windows named pipe として `NamedPipe` にマッピング、`UnixSocket` 判定より優先）
   - `Path::is_absolute()` を満たす（ホスト OS ルールの絶対パス）
 - Windows: Unix socket は基本的に使えないため `npipe://` / `tcp://` URL の利用を推奨。`/var/run/docker.sock` のような Unix 形式のパスを渡した場合はパースは成功するが connect 時に失敗する（`C:\...` 形式も同様）
+- `npipe://` 経由で渡された path は `/` → `\` に正規化してから `bollard::connect_with_named_pipe` に渡す（Windows API 互換のため）
+- `tcp://` は常に `http://` に正規化される（TLS は現状サポート外）。TLS 経由で接続する場合は `DOCKER_HOST=https://...` を直接指定する必要がある
 
 ### UI 変更
 

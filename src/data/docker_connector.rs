@@ -120,7 +120,9 @@ pub fn parse_endpoint(raw: &str) -> Option<DockerEndpoint> {
         return Some(DockerEndpoint::Http(raw.to_string()));
     }
     if let Some(rest) = raw.strip_prefix("npipe://") {
-        return Some(DockerEndpoint::NamedPipe(rest.to_string()));
+        // Windows named pipes require backslash separators; Docker URLs are
+        // sometimes written with forward slashes, so normalize here.
+        return Some(DockerEndpoint::NamedPipe(rest.replace('/', "\\")));
     }
     // Bare Windows named-pipe path (e.g. `\\.\pipe\docker_engine`) must come
     // before the generic absolute-path check so it's not misclassified as a
@@ -289,10 +291,19 @@ fn resolve_cli_context<E: Env>(home: &Path, env: &E) -> Option<(String, DockerEn
         if name != current {
             continue;
         }
-        let host = meta
+        // This context matched by name but may not define a Docker endpoint
+        // (e.g. Kubernetes-only contexts). Fall through rather than
+        // abandoning resolution entirely if this particular context is
+        // unsuitable for Docker.
+        let Some(host) = meta
             .pointer("/Endpoints/docker/Host")
-            .and_then(|v| v.as_str())?;
-        let ep = parse_endpoint(host)?;
+            .and_then(|v| v.as_str())
+        else {
+            continue;
+        };
+        let Some(ep) = parse_endpoint(host) else {
+            continue;
+        };
         return Some((current, ep));
     }
     None
@@ -458,10 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_npipe_url_still_works() {
+    fn parse_npipe_url_normalizes_slashes_to_backslashes() {
         assert_eq!(
             parse_endpoint(r"npipe:////./pipe/docker_engine"),
-            Some(DockerEndpoint::NamedPipe(r"//./pipe/docker_engine".into()))
+            Some(DockerEndpoint::NamedPipe(r"\\.\pipe\docker_engine".into()))
         );
     }
 
@@ -536,6 +547,28 @@ mod tests {
         let r = resolve_endpoint(&cfg_auto(), &env);
         // No probe sockets, no default -> unresolved
         assert!(r.resolved.is_none());
+    }
+
+    #[test]
+    fn cli_context_without_docker_endpoint_falls_through_to_probe() {
+        // A Kubernetes-only context has no Endpoints.docker.Host; we should
+        // keep going and pick up the probe candidate instead of erroring out.
+        let home = PathBuf::from("/home/u");
+        let config_json = r#"{"currentContext":"k8s-only"}"#;
+        let meta = r#"{
+            "Name":"k8s-only",
+            "Endpoints":{"kubernetes":{"Host":"https://k8s.example"}}
+        }"#;
+        let meta_dir = home.join(".docker/contexts/meta/xyz");
+        let colima = home.join(".colima/default/docker.sock");
+        let env = FakeEnv::new()
+            .with_home(&home)
+            .with_file(&home.join(".docker/config.json"), config_json)
+            .with_dir(&home.join(".docker/contexts/meta"), vec![meta_dir.clone()])
+            .with_file(&meta_dir.join("meta.json"), meta)
+            .with_existing(&colima);
+        let resolved = resolve_endpoint(&cfg_auto(), &env).resolved.unwrap();
+        assert_eq!(resolved.source, EndpointSource::Probe("colima".into()));
     }
 
     #[test]
