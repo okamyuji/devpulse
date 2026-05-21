@@ -60,13 +60,15 @@ async fn stream_docker_logs(
 
     let docker = docker_connector::connect(endpoint)?;
 
-    // Determine which containers to stream
+    // Determine which containers to stream.
+    //
+    // We deliberately do NOT filter by `status=running`: a stopped or
+    // exited container still has historical logs that the user typically
+    // wants to see (e.g. "why did postgres crash?"). For non-running
+    // containers `docker.logs` returns the recorded tail and then closes
+    // the stream — no live updates, but the history reaches the panel.
     let container_ids: Vec<String> = if containers == "all" {
-        let mut filters = std::collections::HashMap::new();
-        filters.insert("status", vec!["running"]);
-        let options = ListContainersOptionsBuilder::default()
-            .filters(&filters)
-            .build();
+        let options = ListContainersOptionsBuilder::default().all(true).build();
         let containers = docker.list_containers(Some(options)).await?;
         containers.into_iter().filter_map(|c| c.id).collect()
     } else {
@@ -89,11 +91,15 @@ async fn stream_docker_logs(
             let name = get_container_name(&docker, &id)
                 .await
                 .unwrap_or_else(|| id[..12.min(id.len())].to_string());
+            // tail("200"): pull a meaningful slice of recent history rather
+            // than just the last 50 lines. For a stopped/exited container
+            // this *is* all the log output it will ever produce in this
+            // session, so 50 was easy to lose context in.
             let options = LogsOptionsBuilder::default()
                 .follow(true)
                 .stdout(true)
                 .stderr(true)
-                .tail("50")
+                .tail("200")
                 .build();
             let mut stream = docker.logs(&id, Some(options));
             while let Some(result) = stream.next().await {

@@ -13,7 +13,7 @@ use crate::data::docker::ContainerInfo;
 use crate::data::ports::PortEntry;
 use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
-use crate::ui::common::{ConfirmDialog, HelpOverlay};
+use crate::ui::common::{ConfirmDialog, ErrorOverlay, HelpOverlay};
 use crate::ui::layout::{compute_layout, LayoutMode};
 use crate::ui::panels::docker::DockerPanel;
 use crate::ui::panels::logs::LogsPanel;
@@ -139,6 +139,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
         AppMode::Help => {
             frame.render_widget(HelpOverlay, area);
         }
+        AppMode::Error => {
+            if let Some(err) = app.error_overlay.as_ref() {
+                let overlay = ErrorOverlay {
+                    title: &err.title,
+                    message: &err.message,
+                    log_tail: &err.log_tail,
+                };
+                frame.render_widget(overlay, area);
+            }
+        }
         AppMode::GlobalFilter | AppMode::LogFilter if status_area.height > 0 => {
             // Replace status bar with filter input
             let (label, color, query) = match app.mode {
@@ -184,7 +194,12 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             (",/.", "Sort"),
             ("S", "Sort Dir"),
         ],
-        Panel::Docker => vec![("s", "Stop"), ("r", "Restart"), ("D", "Remove")],
+        Panel::Docker => vec![
+            ("u", "Start"),
+            ("d", "Stop"),
+            ("R", "Restart"),
+            ("r", "Remove"),
+        ],
         Panel::Processes => vec![
             ("K", "Kill"),
             ("Ctrl+K", "Force Kill"),
@@ -257,7 +272,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         AppMode::Help => handle_help_mode(app, key),
         AppMode::LocalFilter => false,
         AppMode::LogFilter => handle_log_filter_mode(app, key),
+        AppMode::Error => handle_error_mode(app, key),
     }
+}
+
+fn handle_error_mode(app: &mut App, _key: KeyEvent) -> bool {
+    // Any key dismisses the overlay and returns to Normal mode.
+    app.dismiss_error_overlay();
+    true
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
@@ -330,7 +352,18 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             }
             true
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char('u') => {
+            if app.active_panel == Panel::Docker {
+                if let Some(id) = app.selected_container_id() {
+                    let action = Action::StartContainer { id };
+                    app.confirm_message = action.description();
+                    app.pending_action = Some(action);
+                    app.mode = AppMode::Confirm;
+                }
+            }
+            true
+        }
+        KeyCode::Char('d') => {
             if app.active_panel == Panel::Docker {
                 if let Some(id) = app.selected_container_id() {
                     let action = Action::StopContainer { id };
@@ -341,7 +374,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             }
             true
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('R') => {
             if app.active_panel == Panel::Docker {
                 if let Some(id) = app.selected_container_id() {
                     let action = Action::RestartContainer { id };
@@ -352,7 +385,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             }
             true
         }
-        KeyCode::Char('D') => {
+        KeyCode::Char('r') => {
             if app.active_panel == Panel::Docker {
                 if let Some(id) = app.selected_container_id() {
                     let action = Action::RemoveContainer { id };
@@ -686,6 +719,65 @@ mod tests {
         // The logs panel should use app.log_filter, not app.global_filter
         assert_eq!(app.log_filter.query(), "");
         assert_eq!(app.global_filter.query(), "node");
+    }
+
+    #[test]
+    fn test_u_key_on_docker_enters_confirm_with_start_action() {
+        use crate::data::docker::{ContainerInfo, ContainerState};
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Docker;
+        app.docker_containers.push(ContainerInfo {
+            id: "deadbeef0000".into(),
+            name: "stopped-svc".into(),
+            image: "alpine".into(),
+            state: ContainerState::Stopped,
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+            memory_limit: 0,
+            ports: vec![],
+            compose_project: None,
+            created: "2026-01-01".into(),
+        });
+        handle_key(&mut app, make_key(KeyCode::Char('u')));
+        assert!(matches!(app.mode, AppMode::Confirm));
+        match app.pending_action.as_ref() {
+            Some(Action::StartContainer { id }) => assert_eq!(id, "deadbeef0000"),
+            other => panic!("expected StartContainer, got {:?}", other),
+        }
+        assert!(app.confirm_message.starts_with("Start container"));
+    }
+
+    #[test]
+    fn test_u_key_on_other_panels_is_noop() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Ports;
+        handle_key(&mut app, make_key(KeyCode::Char('u')));
+        assert!(matches!(app.mode, AppMode::Normal));
+        assert!(app.pending_action.is_none());
+    }
+
+    #[test]
+    fn test_error_mode_dismissed_by_any_key() {
+        let mut app = App::new(Config::default());
+        app.set_start_error("oops".to_string(), vec!["log".to_string()]);
+        assert!(matches!(app.mode, AppMode::Error));
+        // Any key — pick something unrelated to other handlers
+        handle_key(&mut app, make_key(KeyCode::Char('x')));
+        assert!(matches!(app.mode, AppMode::Normal));
+        assert!(app.error_overlay.is_none());
+    }
+
+    #[test]
+    fn test_draw_with_error_overlay() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.set_start_error(
+            "no such image".to_string(),
+            vec!["pull access denied".to_string()],
+        );
+        terminal.draw(|f| draw(f, &app)).unwrap();
     }
 
     #[test]

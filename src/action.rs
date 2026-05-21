@@ -1,6 +1,7 @@
 #[derive(Debug, Clone)]
 pub enum Action {
     KillProcess { pid: u32, force: bool },
+    StartContainer { id: String },
     StopContainer { id: String },
     RestartContainer { id: String },
     RemoveContainer { id: String },
@@ -12,6 +13,9 @@ impl Action {
             Action::KillProcess { pid, force } => {
                 let signal = if *force { "SIGKILL" } else { "SIGTERM" };
                 format!("Kill process PID {} ({})?", pid, signal)
+            }
+            Action::StartContainer { id } => {
+                format!("Start container {}?", &id[..12.min(id.len())])
             }
             Action::StopContainer { id } => format!("Stop container {}?", &id[..12.min(id.len())]),
             Action::RestartContainer { id } => {
@@ -50,6 +54,11 @@ mod tests {
         };
         assert!(matches!(kill, Action::KillProcess { pid: 1234, .. }));
 
+        let start = Action::StartContainer {
+            id: "abc123".to_string(),
+        };
+        assert!(matches!(start, Action::StartContainer { .. }));
+
         let stop = Action::StopContainer {
             id: "abc123".to_string(),
         };
@@ -85,5 +94,12 @@ mod tests {
             id: "abc123def456".to_string(),
         };
         assert!(stop.description().contains("Stop"));
+
+        let start = Action::StartContainer {
+            id: "abc123def456".to_string(),
+        };
+        let start_desc = start.description();
+        assert!(start_desc.starts_with("Start container"));
+        assert!(start_desc.contains("abc123def456"));
     }
 }

@@ -22,6 +22,32 @@ impl ContainerState {
             Self::Created => "Created".to_string(),
         }
     }
+
+    /// Single-glyph indicator drawn at the very start of each container row.
+    ///
+    /// Running uses a play triangle (▶); every non-Running state uses a stop
+    /// square (■). Color is supplied separately via [`Self::indicator_color`].
+    pub fn indicator_glyph(&self) -> &'static str {
+        match self {
+            Self::Running => "▶",
+            _ => "■",
+        }
+    }
+
+    /// Foreground color paired with [`Self::indicator_glyph`].
+    ///
+    /// All "down" states (Stopped / Exited regardless of code) are red so
+    /// they read as dead at a glance — distinguishing exit codes is the
+    /// STATE column's job. Created is amber: not yet started, not dead.
+    pub fn indicator_color(&self) -> ratatui::style::Color {
+        use ratatui::style::Color;
+        match self {
+            Self::Running => Color::Green,
+            Self::Created => Color::Yellow,
+            Self::Exited(_) => Color::Red,
+            Self::Stopped => Color::Red,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,9 +74,14 @@ pub struct ContainerInfo {
 #[async_trait]
 pub trait DockerSource: Send + Sync {
     async fn list_containers(&self) -> Result<Vec<ContainerInfo>>;
+    async fn start_container(&self, id: &str) -> Result<()>;
     async fn stop_container(&self, id: &str) -> Result<()>;
     async fn restart_container(&self, id: &str) -> Result<()>;
     async fn remove_container(&self, id: &str) -> Result<()>;
+    /// Fetch the last `lines` log lines (stdout + stderr) from a container.
+    ///
+    /// Used by the UI to surface diagnostic context when a Start fails.
+    async fn tail_logs(&self, id: &str, lines: usize) -> Result<Vec<String>>;
     fn is_available(&self) -> bool;
 }
 
@@ -178,6 +209,15 @@ impl DockerSource for BollardDockerSource {
         Ok(result)
     }
 
+    async fn start_container(&self, id: &str) -> Result<()> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        client.start_container(id, None).await?;
+        Ok(())
+    }
+
     async fn stop_container(&self, id: &str) -> Result<()> {
         let client = self
             .client
@@ -205,6 +245,44 @@ impl DockerSource for BollardDockerSource {
         Ok(())
     }
 
+    async fn tail_logs(&self, id: &str, lines: usize) -> Result<Vec<String>> {
+        use bollard::query_parameters::LogsOptionsBuilder;
+        use futures_util::StreamExt;
+
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow!("Docker not available"))?;
+        let options = LogsOptionsBuilder::default()
+            .follow(false)
+            .stdout(true)
+            .stderr(true)
+            .tail(&lines.to_string())
+            .build();
+        let mut stream = client.logs(id, Some(options));
+        let mut out: Vec<String> = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(output) => {
+                    let text = format!("{}", output);
+                    // Docker emits one frame per logical log line. Split just in
+                    // case a frame contains multiple lines so the UI sees each
+                    // line independently.
+                    for line in text.lines() {
+                        if !line.is_empty() {
+                            out.push(line.to_string());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("tail_logs error for {}: {}", id, e);
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn is_available(&self) -> bool {
         self.client.is_some()
     }
@@ -213,15 +291,26 @@ impl DockerSource for BollardDockerSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
-    struct MockDockerSource {
-        containers: Vec<ContainerInfo>,
+    #[derive(Default)]
+    pub(crate) struct MockDockerSource {
+        pub containers: Vec<ContainerInfo>,
+        pub fail_start: bool,
+        pub log_tail: Vec<String>,
     }
 
     #[async_trait]
     impl DockerSource for MockDockerSource {
         async fn list_containers(&self) -> Result<Vec<ContainerInfo>> {
             Ok(self.containers.clone())
+        }
+        async fn start_container(&self, _id: &str) -> Result<()> {
+            if self.fail_start {
+                Err(anyhow!("simulated start failure"))
+            } else {
+                Ok(())
+            }
         }
         async fn stop_container(&self, _id: &str) -> Result<()> {
             Ok(())
@@ -231,6 +320,9 @@ mod tests {
         }
         async fn remove_container(&self, _id: &str) -> Result<()> {
             Ok(())
+        }
+        async fn tail_logs(&self, _id: &str, _lines: usize) -> Result<Vec<String>> {
+            Ok(self.log_tail.clone())
         }
         fn is_available(&self) -> bool {
             true
@@ -256,6 +348,7 @@ mod tests {
                 compose_project: Some("myapp".into()),
                 created: "2026-04-03T10:00:00Z".into(),
             }],
+            ..Default::default()
         };
         let containers = source.list_containers().await.unwrap();
         assert_eq!(containers.len(), 1);
@@ -265,8 +358,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_stop() {
-        let source = MockDockerSource { containers: vec![] };
+        let source = MockDockerSource::default();
         assert!(source.stop_container("abc123").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_start_success() {
+        let source = MockDockerSource::default();
+        assert!(source.start_container("abc123").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_start_failure() {
+        let source = MockDockerSource {
+            fail_start: true,
+            ..Default::default()
+        };
+        let err = source.start_container("abc123").await.unwrap_err();
+        assert!(err.to_string().contains("simulated start failure"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_tail_logs_returns_configured_lines() {
+        let source = MockDockerSource {
+            log_tail: vec!["panic: oom".into(), "exit 137".into()],
+            ..Default::default()
+        };
+        let lines = source.tail_logs("abc123", 20).await.unwrap();
+        assert_eq!(
+            lines,
+            vec!["panic: oom".to_string(), "exit 137".to_string()]
+        );
     }
 
     #[test]
@@ -274,5 +396,42 @@ mod tests {
         assert_eq!(ContainerState::Running.as_str(), "Running");
         assert_eq!(ContainerState::Stopped.as_str(), "Stopped");
         assert_eq!(ContainerState::Exited(0).as_str(), "Exited(0)");
+    }
+
+    #[test]
+    fn test_indicator_glyph_running_is_play_triangle() {
+        assert_eq!(ContainerState::Running.indicator_glyph(), "▶");
+    }
+
+    #[test]
+    fn test_indicator_glyph_non_running_is_square() {
+        assert_eq!(ContainerState::Stopped.indicator_glyph(), "■");
+        assert_eq!(ContainerState::Exited(0).indicator_glyph(), "■");
+        assert_eq!(ContainerState::Exited(137).indicator_glyph(), "■");
+        assert_eq!(ContainerState::Created.indicator_glyph(), "■");
+    }
+
+    #[test]
+    fn test_indicator_color_running_is_green() {
+        assert_eq!(ContainerState::Running.indicator_color(), Color::Green);
+    }
+
+    #[test]
+    fn test_indicator_color_created_is_yellow() {
+        assert_eq!(ContainerState::Created.indicator_color(), Color::Yellow);
+    }
+
+    #[test]
+    fn test_indicator_color_exited_is_red_regardless_of_code() {
+        // All "down" states must read as red — distinguishing exit codes
+        // is the STATE column's job, not the indicator.
+        assert_eq!(ContainerState::Exited(0).indicator_color(), Color::Red);
+        assert_eq!(ContainerState::Exited(1).indicator_color(), Color::Red);
+        assert_eq!(ContainerState::Exited(137).indicator_color(), Color::Red);
+    }
+
+    #[test]
+    fn test_indicator_color_stopped_is_red() {
+        assert_eq!(ContainerState::Stopped.indicator_color(), Color::Red);
     }
 }
