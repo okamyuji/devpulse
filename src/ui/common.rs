@@ -94,7 +94,16 @@ impl<'a> Widget for ErrorOverlay<'a> {
         let overhead_rows: u16 = 7;
         let log_area_rows = dialog_area.height.saturating_sub(overhead_rows) as usize;
         let total_logs = self.log_tail.len();
-        let displayed: &[String] = if total_logs > log_area_rows && log_area_rows > 0 {
+        // Three cases:
+        //   - log_area_rows == 0: the dialog is too small to render any log
+        //     row, so don't build Span lines for content that would only be
+        //     clipped off-screen.
+        //   - total_logs > log_area_rows: keep the newest lines (the tail),
+        //     since those are what diagnose a failure.
+        //   - otherwise: everything fits, show it all.
+        let displayed: &[String] = if log_area_rows == 0 {
+            &[]
+        } else if total_logs > log_area_rows {
             &self.log_tail[total_logs - log_area_rows..]
         } else {
             self.log_tail
@@ -245,6 +254,21 @@ mod tests {
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
         o.render(Rect::new(0, 0, 80, 24), &mut buf);
+    }
+    #[test]
+    fn test_error_overlay_skips_log_processing_when_no_space() {
+        // When the dialog is so short there's no room for log rows after
+        // the overhead (title/message/header/footer), the renderer must
+        // still produce a valid buffer without iterating the full tail.
+        let logs: Vec<String> = (0..500).map(|i| format!("log {i}")).collect();
+        let o = ErrorOverlay {
+            title: "Start failed",
+            message: "boom",
+            log_tail: &logs,
+        };
+        // height < overhead_rows(7) → log_area_rows = 0
+        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 6));
+        o.render(Rect::new(0, 0, 80, 6), &mut buf);
     }
     #[test]
     fn test_error_overlay_handles_many_logs_without_panic() {
