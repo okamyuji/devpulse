@@ -20,6 +20,18 @@ pub enum AppMode {
     LogFilter,
     Confirm,
     Help,
+    Error,
+}
+
+/// Diagnostic context surfaced when a Docker action (currently: Start) fails.
+///
+/// Captured at execute-time and shown via `ErrorOverlay` until the user
+/// dismisses it with any keypress.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorState {
+    pub title: String,
+    pub message: String,
+    pub log_tail: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -145,6 +157,9 @@ pub struct App {
     // Actions
     pub pending_action: Option<Action>,
     pub confirm_message: String,
+    /// Set when an action fails and the user should see diagnostic context.
+    /// Cleared on any keypress while in [`AppMode::Error`].
+    pub error_overlay: Option<ErrorState>,
     // Toggle states
     pub tail_follow: bool,
     pub wrap_logs: bool,
@@ -220,6 +235,7 @@ impl App {
             docker_endpoint,
             pending_action: None,
             confirm_message: String::new(),
+            error_overlay: None,
             log_filter: FilterState::new(),
             tail_follow,
             wrap_logs: false,
@@ -491,6 +507,20 @@ impl App {
             Action::KillProcess { pid, force } => {
                 crate::action::kill_process(*pid, *force);
             }
+            Action::StartContainer { id } => {
+                #[cfg(not(test))]
+                {
+                    if let Err(e) = self.docker_source.start_container(id).await {
+                        let log_tail = self
+                            .docker_source
+                            .tail_logs(id, Self::ERROR_LOG_TAIL_LINES)
+                            .await
+                            .unwrap_or_default();
+                        self.set_start_error(e.to_string(), log_tail);
+                    }
+                }
+                let _ = id;
+            }
             Action::StopContainer { id } => {
                 #[cfg(not(test))]
                 {
@@ -512,6 +542,34 @@ impl App {
                 }
                 let _ = id;
             }
+        }
+    }
+
+    /// Number of recent log lines surfaced when a Docker action fails.
+    ///
+    /// Chosen large enough to capture stack traces and multi-line panics
+    /// (typical Java/Python crashes can run 100+ lines), but small enough
+    /// to render in a single overlay without paging.
+    pub const ERROR_LOG_TAIL_LINES: usize = 200;
+
+    /// Record a Start failure and transition into the error overlay mode.
+    ///
+    /// Extracted from [`Self::execute_action`] so unit tests can verify the
+    /// failure-path UI state without instantiating a live Docker source.
+    pub fn set_start_error(&mut self, message: impl Into<String>, log_tail: Vec<String>) {
+        self.error_overlay = Some(ErrorState {
+            title: "Start failed".to_string(),
+            message: message.into(),
+            log_tail,
+        });
+        self.mode = AppMode::Error;
+    }
+
+    /// Dismiss the error overlay and return to normal mode.
+    pub fn dismiss_error_overlay(&mut self) {
+        self.error_overlay = None;
+        if matches!(self.mode, AppMode::Error) {
+            self.mode = AppMode::Normal;
         }
     }
 
@@ -776,5 +834,41 @@ mod tests {
         app.mode = AppMode::Confirm;
         assert!(matches!(app.mode, AppMode::Confirm));
         assert!(app.pending_action.is_some());
+    }
+
+    #[test]
+    fn test_set_start_error_transitions_to_error_mode() {
+        let mut app = test_app();
+        app.set_start_error(
+            "no such image".to_string(),
+            vec!["pull access denied".to_string()],
+        );
+        assert!(matches!(app.mode, AppMode::Error));
+        let overlay = app.error_overlay.as_ref().expect("overlay must be set");
+        assert_eq!(overlay.title, "Start failed");
+        assert_eq!(overlay.message, "no such image");
+        assert_eq!(overlay.log_tail, vec!["pull access denied".to_string()]);
+    }
+
+    #[test]
+    fn test_dismiss_error_overlay_clears_state_and_returns_to_normal() {
+        let mut app = test_app();
+        app.set_start_error("boom".to_string(), vec!["log line".to_string()]);
+        assert!(matches!(app.mode, AppMode::Error));
+        assert!(app.error_overlay.is_some());
+
+        app.dismiss_error_overlay();
+        assert!(matches!(app.mode, AppMode::Normal));
+        assert!(app.error_overlay.is_none());
+    }
+
+    #[test]
+    fn test_pending_start_container_action() {
+        let mut app = test_app();
+        app.pending_action = Some(Action::StartContainer {
+            id: "deadbeef0000".into(),
+        });
+        let action = app.pending_action.as_ref().unwrap();
+        assert!(action.description().starts_with("Start container"));
     }
 }

@@ -4,7 +4,8 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Row, Table, Widget},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Row, Table, Widget},
 };
 
 pub struct DockerPanel<'a> {
@@ -72,14 +73,14 @@ impl<'a> Widget for DockerPanel<'a> {
             }
             return;
         }
-        let header = Row::new(vec!["NAME", "IMAGE", "STATE", "CPU%", "MEM", "PORTS"])
+        let header = Row::new(vec!["S", "NAME", "IMAGE", "STATE", "CPU%", "MEM", "PORTS"])
             .style(Style::default().add_modifier(Modifier::BOLD));
         let rows: Vec<Row> = self
             .containers
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let style = if i == self.selected {
+                let row_style = if i == self.selected {
                     Style::default().bg(Color::DarkGray)
                 } else {
                     Style::default()
@@ -90,20 +91,28 @@ impl<'a> Widget for DockerPanel<'a> {
                     .map(|p| format!("{}:{}", p.host, p.container))
                     .collect::<Vec<_>>()
                     .join(", ");
+                let indicator = Cell::from(Line::from(Span::styled(
+                    c.state.indicator_glyph().to_string(),
+                    Style::default()
+                        .fg(c.state.indicator_color())
+                        .add_modifier(Modifier::BOLD),
+                )));
                 Row::new(vec![
-                    c.name.clone(),
-                    c.image.clone(),
-                    c.state.as_str(),
-                    format!("{:.1}", c.cpu_percent),
-                    format_bytes(c.memory_bytes),
-                    ports_str,
+                    indicator,
+                    Cell::from(c.name.clone()),
+                    Cell::from(c.image.clone()),
+                    Cell::from(c.state.as_str()),
+                    Cell::from(format!("{:.1}", c.cpu_percent)),
+                    Cell::from(format_bytes(c.memory_bytes)),
+                    Cell::from(ports_str),
                 ])
-                .style(style)
+                .style(row_style)
             })
             .collect();
         let table = Table::new(
             rows,
             [
+                Constraint::Length(2),
                 Constraint::Min(12),
                 Constraint::Min(10),
                 Constraint::Length(10),
@@ -153,6 +162,56 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         p.render(Rect::new(0, 0, 60, 10), &mut buf);
     }
+    #[test]
+    fn test_render_all_states_no_panic() {
+        fn make(name: &str, state: ContainerState) -> ContainerInfo {
+            ContainerInfo {
+                id: format!("id-{}", name),
+                name: name.into(),
+                image: "img".into(),
+                state,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-04-03".into(),
+            }
+        }
+        let containers = vec![
+            make("run", ContainerState::Running),
+            make("stp", ContainerState::Stopped),
+            make("ok", ContainerState::Exited(0)),
+            make("ng", ContainerState::Exited(137)),
+            make("new", ContainerState::Created),
+        ];
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 0,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: Some("colima"),
+            resolution_summary: &summary,
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 100, 20));
+        p.render(Rect::new(0, 0, 100, 20), &mut buf);
+
+        // Block border sits at x=0/y=0, so the inner area starts at (1, 1).
+        // Row layout inside the inner area: y=1 is header, y=2 is the first
+        // data row. The indicator column is the first column, so the glyph
+        // lives at (1, 2). Both ▶ (Running) and ■ (non-Running) are valid
+        // here since rows can be in any order; just confirm a glyph cell is
+        // present in the indicator column.
+        let first_row_glyph = buf.cell((1, 2)).map(|c| c.symbol().to_string());
+        assert!(
+            first_row_glyph == Some("▶".to_string()) || first_row_glyph == Some("■".to_string()),
+            "expected indicator glyph in indicator column at (1,2), got {:?}",
+            first_row_glyph
+        );
+    }
+
     #[test]
     fn test_unavailable() {
         let summary = vec![
