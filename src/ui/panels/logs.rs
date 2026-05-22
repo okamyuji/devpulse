@@ -1,5 +1,5 @@
-use crate::data::logs::{LogBuffer, LogLevel};
-use crate::filter::FilterState;
+use crate::data::logs::{LogEntry, LogLevel};
+use crate::ui::common::render_panel_scrollbar;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -9,25 +9,25 @@ use ratatui::{
 };
 
 pub struct LogsPanel<'a> {
-    pub buffer: &'a LogBuffer,
+    /// Pre-filtered log entries (filtering is done in the draw layer).
+    pub entries: &'a [&'a LogEntry],
     pub selected: usize,
     pub filter_text: &'a str,
-    /// Docker panel selected container name filter (None = show all)
-    pub container_filter: Option<&'a str>,
-    /// Log-panel-local AND filter
-    pub log_filter: &'a FilterState,
+    /// Docker panel selected container name (display only, for the title).
+    pub container_label: Option<&'a str>,
     pub is_focused: bool,
     pub tail_follow: bool,
     pub wrap: bool,
+    /// Manual scroll offset (used when `tail_follow` is false).
+    pub scroll_offset: usize,
 }
 
 impl<'a> Widget for LogsPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let follow_indicator = if self.tail_follow { " FOLLOW" } else { "" };
 
-        // Build title with container and filter info
         let mut title_parts = vec![" Logs".to_string()];
-        if let Some(container) = self.container_filter {
+        if let Some(container) = self.container_label {
             title_parts.push(format!(" [{}]", container));
         }
         if !self.filter_text.is_empty() {
@@ -42,37 +42,15 @@ impl<'a> Widget for LogsPanel<'a> {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Filter entries by container name AND log filter terms
-        let filtered_entries: Vec<_> = self
-            .buffer
-            .entries()
-            .iter()
-            .filter(|entry| {
-                // Container filter: match source name
-                if let Some(container) = self.container_filter {
-                    if entry.source != container {
-                        return false;
-                    }
-                }
-                // Log local filter: AND condition on source+message
-                if self.log_filter.is_active() {
-                    let text = format!("[{}] {}", entry.source, entry.message);
-                    if !self.log_filter.matches_all_terms(&text) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
-
-        let count_text = format!(" {} lines ", filtered_entries.len());
+        let count_text = format!(" {} lines ", self.entries.len());
         let block = Block::default()
             .title(title)
             .title_bottom(count_text)
             .borders(Borders::ALL)
             .border_style(border_style);
 
-        let lines: Vec<Line> = filtered_entries
+        let lines: Vec<Line> = self
+            .entries
             .iter()
             .map(|entry| {
                 let color = match entry.level {
@@ -87,178 +65,92 @@ impl<'a> Widget for LogsPanel<'a> {
             })
             .collect();
 
-        let mut paragraph = Paragraph::new(lines.clone()).block(block);
+        let inner_height = (area.height as usize).saturating_sub(2);
+        let total_lines = lines.len();
+        let max_scroll = total_lines.saturating_sub(inner_height);
+        let scroll = if self.tail_follow {
+            max_scroll
+        } else {
+            self.scroll_offset.min(max_scroll)
+        };
+        let mut paragraph = Paragraph::new(lines).block(block);
         if self.wrap {
             paragraph = paragraph.wrap(Wrap { trim: false });
         }
-        if self.tail_follow && !lines.is_empty() {
-            let inner_height = area.height.saturating_sub(2) as usize;
-            let scroll = lines.len().saturating_sub(inner_height);
-            paragraph = paragraph.scroll((scroll as u16, 0));
+        if total_lines > 0 && scroll > 0 {
+            let clamped = scroll.min(u16::MAX as usize) as u16;
+            paragraph = paragraph.scroll((clamped, 0));
         }
         Widget::render(paragraph, area, buf);
+
+        render_panel_scrollbar(buf, area, total_lines, inner_height, scroll);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::logs::{LogEntry, LogLevel};
+    use crate::data::logs::LogLevel;
 
-    fn make_log_buffer() -> LogBuffer {
-        let mut buffer = LogBuffer::new(100);
-        buffer.push(LogEntry {
-            timestamp: 1,
-            source: "app-web".into(),
-            level: LogLevel::Info,
-            message: "request started".into(),
-        });
-        buffer.push(LogEntry {
-            timestamp: 2,
-            source: "app-db".into(),
-            level: LogLevel::Error,
-            message: "connection timeout".into(),
-        });
-        buffer.push(LogEntry {
-            timestamp: 3,
-            source: "app-web".into(),
-            level: LogLevel::Warn,
-            message: "slow query detected".into(),
-        });
-        buffer
+    fn sample_entries() -> Vec<LogEntry> {
+        vec![
+            LogEntry {
+                timestamp: 1,
+                source: "app-web".into(),
+                level: LogLevel::Info,
+                message: "request started".into(),
+            },
+            LogEntry {
+                timestamp: 2,
+                source: "app-db".into(),
+                level: LogLevel::Error,
+                message: "connection timeout".into(),
+            },
+            LogEntry {
+                timestamp: 3,
+                source: "app-web".into(),
+                level: LogLevel::Warn,
+                message: "slow query detected".into(),
+            },
+        ]
+    }
+
+    fn make_panel<'a>(entries: &'a [&'a LogEntry]) -> LogsPanel<'a> {
+        LogsPanel {
+            entries,
+            selected: 0,
+            filter_text: "",
+            container_label: None,
+            is_focused: true,
+            tail_follow: false,
+            wrap: false,
+            scroll_offset: 0,
+        }
     }
 
     #[test]
     fn test_render_no_panic() {
-        let buffer = make_log_buffer();
-        let filter = FilterState::new();
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "",
-            container_filter: None,
-            log_filter: &filter,
-            is_focused: true,
-            tail_follow: true,
-            wrap: false,
-        };
+        let entries = sample_entries();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let mut p = make_panel(&refs);
+        p.tail_follow = true;
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         p.render(Rect::new(0, 0, 60, 10), &mut buf);
     }
 
     #[test]
-    fn test_empty_buffer() {
-        let buffer = LogBuffer::new(100);
-        let filter = FilterState::new();
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "",
-            container_filter: None,
-            log_filter: &filter,
-            is_focused: false,
-            tail_follow: false,
-            wrap: false,
-        };
+    fn test_empty_entries() {
+        let refs: Vec<&LogEntry> = vec![];
+        let p = make_panel(&refs);
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         p.render(Rect::new(0, 0, 60, 10), &mut buf);
     }
 
     #[test]
-    fn test_container_filter_shows_only_matching_source() {
-        let buffer = make_log_buffer();
-        let filter = FilterState::new();
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "",
-            container_filter: Some("app-web"),
-            log_filter: &filter,
-            is_focused: true,
-            tail_follow: false,
-            wrap: false,
-        };
-        // Render and check line count in title_bottom
-        let area = Rect::new(0, 0, 80, 20);
-        let mut buf = Buffer::empty(area);
-        p.render(area, &mut buf);
-        // The title_bottom should show "2 lines" (only app-web entries)
-        let rendered = buf_to_string(&buf);
-        assert!(
-            rendered.contains("2 lines"),
-            "Expected '2 lines' for container filter 'app-web', got: {}",
-            rendered
-        );
-    }
-
-    #[test]
-    fn test_log_filter_and_condition() {
-        let buffer = make_log_buffer();
-        let mut filter = FilterState::new();
-        filter.set_query("app-web slow");
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "app-web slow",
-            container_filter: None,
-            log_filter: &filter,
-            is_focused: true,
-            tail_follow: false,
-            wrap: false,
-        };
-        let area = Rect::new(0, 0, 80, 20);
-        let mut buf = Buffer::empty(area);
-        p.render(area, &mut buf);
-        let rendered = buf_to_string(&buf);
-        // Only entry 3 matches: source=app-web, message contains "slow"
-        assert!(
-            rendered.contains("1 lines"),
-            "Expected '1 lines' for AND filter 'app-web slow', got: {}",
-            rendered
-        );
-    }
-
-    #[test]
-    fn test_container_filter_plus_log_filter() {
-        let buffer = make_log_buffer();
-        let mut filter = FilterState::new();
-        filter.set_query("request");
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "request",
-            container_filter: Some("app-web"),
-            log_filter: &filter,
-            is_focused: true,
-            tail_follow: false,
-            wrap: false,
-        };
-        let area = Rect::new(0, 0, 80, 20);
-        let mut buf = Buffer::empty(area);
-        p.render(area, &mut buf);
-        let rendered = buf_to_string(&buf);
-        // container=app-web (2 entries), then AND filter "request" → 1 entry
-        assert!(
-            rendered.contains("1 lines"),
-            "Expected '1 lines', got: {}",
-            rendered
-        );
-    }
-
-    #[test]
-    fn test_no_filter_shows_all() {
-        let buffer = make_log_buffer();
-        let filter = FilterState::new();
-        let p = LogsPanel {
-            buffer: &buffer,
-            selected: 0,
-            filter_text: "",
-            container_filter: None,
-            log_filter: &filter,
-            is_focused: true,
-            tail_follow: false,
-            wrap: false,
-        };
+    fn test_displays_correct_line_count() {
+        let entries = sample_entries();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let p = make_panel(&refs);
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
         p.render(area, &mut buf);
@@ -267,6 +159,127 @@ mod tests {
             rendered.contains("3 lines"),
             "Expected '3 lines', got: {}",
             rendered
+        );
+    }
+
+    #[test]
+    fn test_pre_filtered_two_entries_shows_2_lines() {
+        let entries = sample_entries();
+        // Simulate container filter — only app-web entries
+        let refs: Vec<&LogEntry> = entries.iter().filter(|e| e.source == "app-web").collect();
+        let mut p = make_panel(&refs);
+        p.container_label = Some("app-web");
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let rendered = buf_to_string(&buf);
+        assert!(
+            rendered.contains("2 lines"),
+            "Expected '2 lines', got: {}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_visible_when_log_overflow() {
+        let entries: Vec<LogEntry> = (0..50)
+            .map(|i| LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line {}", i),
+            })
+            .collect();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let mut p = make_panel(&refs);
+        p.tail_follow = true;
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let x = area.x + area.width - 1;
+        let mut col = String::new();
+        for y in area.y..area.y + area.height {
+            col.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        assert!(
+            col.contains('█'),
+            "expected scrollbar thumb on right edge for overflowing logs, got: {:?}",
+            col
+        );
+    }
+
+    #[test]
+    fn test_manual_scroll_offset_shifts_visible_logs() {
+        let entries: Vec<LogEntry> = (0..40)
+            .map(|i| LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line-{:02}", i),
+            })
+            .collect();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let mut p = make_panel(&refs);
+        p.scroll_offset = 10;
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let rendered = buf_to_string(&buf);
+        assert!(
+            rendered.contains("line-10"),
+            "expected line-10 visible after scrolling 10 down, got:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("line-00"),
+            "expected line-00 to be scrolled off-screen, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_thumb_reaches_bottom_at_last_log() {
+        let entries: Vec<LogEntry> = (0..40)
+            .map(|i| LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line-{:02}", i),
+            })
+            .collect();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let mut p = make_panel(&refs);
+        p.tail_follow = true;
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let last_y = area.y + area.height - 2;
+        let last_x = area.x + area.width - 1;
+        let cell = buf[(last_x, last_y)].symbol().to_string();
+        assert_eq!(
+            cell, "█",
+            "expected scrollbar thumb on the last bar cell when following the tail, got {:?}",
+            cell
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_hidden_when_logs_fit() {
+        let entries = sample_entries();
+        let refs: Vec<&LogEntry> = entries.iter().collect();
+        let p = make_panel(&refs);
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let x = area.x + area.width - 1;
+        let mut col = String::new();
+        for y in area.y..area.y + area.height {
+            col.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        assert!(
+            !col.contains('█'),
+            "expected no scrollbar thumb when logs fit, got: {:?}",
+            col
         );
     }
 

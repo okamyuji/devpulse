@@ -1,11 +1,11 @@
 use crate::data::docker::ContainerInfo;
-use crate::ui::common::format_bytes;
+use crate::ui::common::{format_bytes, render_panel_scrollbar};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Row, Table, Widget},
+    widgets::{Block, Borders, Cell, Row, StatefulWidget, Table, TableState, Widget},
 };
 
 pub struct DockerPanel<'a> {
@@ -20,6 +20,15 @@ pub struct DockerPanel<'a> {
 
 impl<'a> Widget for DockerPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let selected = self.selected;
+        let mut state = TableState::default().with_selected(Some(selected));
+        StatefulWidget::render(self, area, buf, &mut state);
+    }
+}
+
+impl<'a> StatefulWidget for DockerPanel<'a> {
+    type State = TableState;
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut TableState) {
         let base_title = match self.context_name {
             Some(ctx) => format!(" Docker [{}] ", ctx),
             None => " Docker ".to_string(),
@@ -78,13 +87,7 @@ impl<'a> Widget for DockerPanel<'a> {
         let rows: Vec<Row> = self
             .containers
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let row_style = if i == self.selected {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
+            .map(|c| {
                 let ports_str = c
                     .ports
                     .iter()
@@ -106,7 +109,6 @@ impl<'a> Widget for DockerPanel<'a> {
                     Cell::from(format_bytes(c.memory_bytes)),
                     Cell::from(ports_str),
                 ])
-                .style(row_style)
             })
             .collect();
         let table = Table::new(
@@ -122,8 +124,14 @@ impl<'a> Widget for DockerPanel<'a> {
             ],
         )
         .header(header)
-        .block(block);
-        Widget::render(table, area, buf);
+        .block(block)
+        .row_highlight_style(Style::default().bg(Color::DarkGray));
+        StatefulWidget::render(table, area, buf, state);
+
+        // Scrollbar: borders (2) + header (1) consumed by the block, the rest
+        // is data rows. Hide when everything fits.
+        let visible = (area.height as usize).saturating_sub(3);
+        render_panel_scrollbar(buf, area, self.containers.len(), visible, state.offset());
     }
 }
 
@@ -160,7 +168,7 @@ mod tests {
             resolution_summary: &summary,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
-        p.render(Rect::new(0, 0, 60, 10), &mut buf);
+        Widget::render(p, Rect::new(0, 0, 60, 10), &mut buf);
     }
     #[test]
     fn test_render_all_states_no_panic() {
@@ -196,7 +204,7 @@ mod tests {
             resolution_summary: &summary,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 100, 20));
-        p.render(Rect::new(0, 0, 100, 20), &mut buf);
+        Widget::render(p, Rect::new(0, 0, 100, 20), &mut buf);
 
         // Block border sits at x=0/y=0, so the inner area starts at (1, 1).
         // Row layout inside the inner area: y=1 is header, y=2 is the first
@@ -209,6 +217,229 @@ mod tests {
             first_row_glyph == Some("▶".to_string()) || first_row_glyph == Some("■".to_string()),
             "expected indicator glyph in indicator column at (1,2), got {:?}",
             first_row_glyph
+        );
+    }
+
+    #[test]
+    fn test_stateful_render_scrolls_to_keep_selected_visible() {
+        // 30 containers in a 10-row-high area: row 25 is well outside the
+        // initial view. After rendering, TableState::offset must move so the
+        // selected row is included in the rendered range.
+        let containers: Vec<ContainerInfo> = (0..30)
+            .map(|i| ContainerInfo {
+                id: format!("id-{:02}", i),
+                name: format!("c-{:02}", i),
+                image: "img".into(),
+                state: ContainerState::Running,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-01-01".into(),
+            })
+            .collect();
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 25,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: None,
+            resolution_summary: &summary,
+        };
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(25)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        assert!(
+            state.offset() > 0,
+            "expected scroll offset to advance, got {}",
+            state.offset()
+        );
+        let rendered = buf_to_string(&buf);
+        assert!(
+            rendered.contains("c-25"),
+            "expected selected row 'c-25' to be visible in rendered buffer, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_stateful_render_keeps_offset_when_selection_in_view() {
+        // If selected row is inside the initial view, offset should stay at 0.
+        let containers: Vec<ContainerInfo> = (0..30)
+            .map(|i| ContainerInfo {
+                id: format!("id-{:02}", i),
+                name: format!("c-{:02}", i),
+                image: "img".into(),
+                state: ContainerState::Running,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-01-01".into(),
+            })
+            .collect();
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 1,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: None,
+            resolution_summary: &summary,
+        };
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(1)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        assert_eq!(state.offset(), 0);
+    }
+
+    fn buf_to_string(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut result = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                result.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            result.push('\n');
+        }
+        result
+    }
+
+    fn right_edge_column(buf: &Buffer) -> String {
+        let area = buf.area;
+        let x = area.x + area.width - 1;
+        let mut col = String::new();
+        for y in area.y..area.y + area.height {
+            col.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        col
+    }
+
+    #[test]
+    fn test_scrollbar_visible_when_overflow() {
+        let containers: Vec<ContainerInfo> = (0..30)
+            .map(|i| ContainerInfo {
+                id: format!("id-{:02}", i),
+                name: format!("c-{:02}", i),
+                image: "img".into(),
+                state: ContainerState::Running,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-01-01".into(),
+            })
+            .collect();
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 0,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: None,
+            resolution_summary: &summary,
+        };
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(0)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        let col = right_edge_column(&buf);
+        assert!(
+            col.contains('█'),
+            "expected scrollbar thumb '█' on right edge, got column: {:?}",
+            col
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_thumb_reaches_bottom_at_last_row() {
+        // After selecting the last row, the table offset is total-visible
+        // (= scrollable max). The scrollbar thumb must sit on the very last
+        // cell of the bar — i.e. one row above the bottom border.
+        let containers: Vec<ContainerInfo> = (0..30)
+            .map(|i| ContainerInfo {
+                id: format!("id-{:02}", i),
+                name: format!("c-{:02}", i),
+                image: "img".into(),
+                state: ContainerState::Running,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-01-01".into(),
+            })
+            .collect();
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 29,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: None,
+            resolution_summary: &summary,
+        };
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(29)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        // scrollbar_area lives inside the borders: y = area.y+1 .. area.y+area.height-1.
+        // Its last cell is area.y + area.height - 2.
+        let last_y = area.y + area.height - 2;
+        let last_x = area.x + area.width - 1;
+        let cell = buf[(last_x, last_y)].symbol().to_string();
+        assert_eq!(
+            cell, "█",
+            "expected scrollbar thumb on the very last bar cell (y={}), got {:?}",
+            last_y, cell
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_hidden_when_fits() {
+        let containers: Vec<ContainerInfo> = (0..3)
+            .map(|i| ContainerInfo {
+                id: format!("id-{:02}", i),
+                name: format!("c-{:02}", i),
+                image: "img".into(),
+                state: ContainerState::Running,
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                memory_limit: 0,
+                ports: vec![],
+                compose_project: None,
+                created: "2026-01-01".into(),
+            })
+            .collect();
+        let summary: Vec<String> = Vec::new();
+        let p = DockerPanel {
+            containers: &containers,
+            selected: 0,
+            filter_text: "",
+            is_focused: true,
+            is_available: true,
+            context_name: None,
+            resolution_summary: &summary,
+        };
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(0)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        let col = right_edge_column(&buf);
+        assert!(
+            !col.contains('█'),
+            "expected no scrollbar thumb when content fits, got column: {:?}",
+            col
         );
     }
 
@@ -228,6 +459,6 @@ mod tests {
             resolution_summary: &summary,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
-        p.render(Rect::new(0, 0, 60, 10), &mut buf);
+        Widget::render(p, Rect::new(0, 0, 60, 10), &mut buf);
     }
 }

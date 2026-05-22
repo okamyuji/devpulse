@@ -5,11 +5,13 @@ pub mod panels;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use ratatui::widgets::TableState;
 use ratatui::Frame;
 
 use crate::action::Action;
 use crate::app::{App, AppMode};
 use crate::data::docker::ContainerInfo;
+use crate::data::logs::LogEntry;
 use crate::data::ports::PortEntry;
 use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
@@ -20,8 +22,13 @@ use crate::ui::panels::logs::LogsPanel;
 use crate::ui::panels::ports::PortsPanel;
 use crate::ui::panels::processes::ProcessesPanel;
 
-/// Draw all panels and overlays onto the frame
-pub fn draw(frame: &mut Frame, app: &App) {
+/// Draw all panels and overlays onto the frame.
+///
+/// Takes `&mut App` because table panels persist their scroll offsets
+/// across frames via `PanelState::scroll_offset` — ratatui's `TableState`
+/// adjusts the offset during `render_stateful_widget` and we read the
+/// updated value back so the next frame stays scrolled.
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let (panel_areas, status_area) = compute_layout(area, LayoutMode::Quad, app.fullscreen_panel);
     let filter_text = app.global_filter.query();
@@ -64,60 +71,106 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // Ports panel
     let ports_area = panel_areas[Panel::Ports as usize];
     if ports_area.width > 0 && ports_area.height > 0 {
+        let selected = app.panel_states[Panel::Ports as usize].selected_index;
+        let offset = app.panel_states[Panel::Ports as usize].scroll_offset;
         let ports_panel = PortsPanel {
             entries: &filtered_ports,
-            selected: app.panel_states[Panel::Ports as usize].selected_index,
+            selected,
             filter_text,
             is_focused: app.active_panel == Panel::Ports,
             sort_column: app.port_sort,
             sort_direction: app.port_sort_dir,
         };
-        frame.render_widget(ports_panel, ports_area);
+        let mut state = TableState::default()
+            .with_selected(Some(selected))
+            .with_offset(offset);
+        frame.render_stateful_widget(ports_panel, ports_area, &mut state);
+        app.panel_states[Panel::Ports as usize].scroll_offset = state.offset();
     }
 
     // Docker panel
     let docker_area = panel_areas[Panel::Docker as usize];
     if docker_area.width > 0 && docker_area.height > 0 {
+        let selected = app.panel_states[Panel::Docker as usize].selected_index;
+        let offset = app.panel_states[Panel::Docker as usize].scroll_offset;
         let docker_panel = DockerPanel {
             containers: &filtered_containers,
-            selected: app.panel_states[Panel::Docker as usize].selected_index,
+            selected,
             filter_text,
             is_focused: app.active_panel == Panel::Docker,
             is_available: app.docker_available,
             context_name: app.docker_context_name.as_deref(),
             resolution_summary: &app.docker_resolution_summary,
         };
-        frame.render_widget(docker_panel, docker_area);
+        let mut state = TableState::default()
+            .with_selected(Some(selected))
+            .with_offset(offset);
+        frame.render_stateful_widget(docker_panel, docker_area, &mut state);
+        app.panel_states[Panel::Docker as usize].scroll_offset = state.offset();
     }
 
     // Processes panel
     let processes_area = panel_areas[Panel::Processes as usize];
     if processes_area.width > 0 && processes_area.height > 0 {
+        let selected = app.panel_states[Panel::Processes as usize].selected_index;
+        let offset = app.panel_states[Panel::Processes as usize].scroll_offset;
         let processes_panel = ProcessesPanel {
             processes: &filtered_processes,
-            selected: app.panel_states[Panel::Processes as usize].selected_index,
+            selected,
             filter_text,
             is_focused: app.active_panel == Panel::Processes,
             tree_mode: app.tree_mode,
             sort_column: app.process_sort,
             sort_direction: app.process_sort_dir,
         };
-        frame.render_widget(processes_panel, processes_area);
+        let mut state = TableState::default()
+            .with_selected(Some(selected))
+            .with_offset(offset);
+        frame.render_stateful_widget(processes_panel, processes_area, &mut state);
+        app.panel_states[Panel::Processes as usize].scroll_offset = state.offset();
     }
 
-    // Logs panel — uses log-local filter (AND condition) + Docker container filter
+    // Logs panel — uses log-local filter (AND condition) + Docker container filter.
+    // Filtering is done here (once) so both the scroll-offset clamp and the
+    // widget see the same filtered set without duplicating the filter logic.
     let logs_area = panel_areas[Panel::Logs as usize];
     if logs_area.width > 0 && logs_area.height > 0 {
         let container_filter = app.selected_container_name();
+        let log_filter_active = app.log_filter.is_active();
+        let filtered_log_entries: Vec<&LogEntry> = app
+            .log_buffer
+            .entries()
+            .iter()
+            .filter(|entry| {
+                if let Some(c) = container_filter.as_deref() {
+                    if entry.source != c {
+                        return false;
+                    }
+                }
+                if log_filter_active {
+                    let text = format!("[{}] {}", entry.source, entry.message);
+                    if !app.log_filter.matches_all_terms(&text) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let inner_height = (logs_area.height as usize).saturating_sub(2);
+        let max_scroll = filtered_log_entries.len().saturating_sub(inner_height);
+        let logs_state = &mut app.panel_states[Panel::Logs as usize];
+        logs_state.scroll_offset = logs_state.scroll_offset.min(max_scroll);
+        let scroll_offset = logs_state.scroll_offset;
         let logs_panel = LogsPanel {
-            buffer: &app.log_buffer,
-            selected: app.panel_states[Panel::Logs as usize].selected_index,
+            entries: &filtered_log_entries,
+            selected: logs_state.selected_index,
             filter_text: app.log_filter.query(),
-            container_filter: container_filter.as_deref(),
-            log_filter: &app.log_filter,
+            container_label: container_filter.as_deref(),
             is_focused: app.active_panel == Panel::Logs,
             tail_follow: app.tail_follow,
             wrap: app.wrap_logs,
+            scroll_offset,
         };
         frame.render_widget(logs_panel, logs_area);
     }
@@ -643,8 +696,8 @@ mod tests {
         use ratatui::{backend::TestBackend, Terminal};
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let app = App::new(Config::default());
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        let mut app = App::new(Config::default());
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -654,7 +707,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Config::default());
         app.mode = AppMode::Help;
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -665,7 +718,7 @@ mod tests {
         let mut app = App::new(Config::default());
         app.mode = AppMode::Confirm;
         app.confirm_message = "Kill process?".to_string();
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -777,7 +830,7 @@ mod tests {
             "no such image".to_string(),
             vec!["pull access denied".to_string()],
         );
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 
     #[test]
@@ -788,6 +841,6 @@ mod tests {
         let mut app = App::new(Config::default());
         app.mode = AppMode::GlobalFilter;
         app.global_filter.set_query("node");
-        terminal.draw(|f| draw(f, &app)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 }

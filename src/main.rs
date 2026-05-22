@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     let mut last_tick = Instant::now();
     loop {
         // Draw
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
 
         // Poll events. Cap at 50ms so the loop also services log drains
         // and scheduled ticks even when the user isn't typing — without

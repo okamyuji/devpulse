@@ -293,6 +293,16 @@ impl App {
         }
     }
     pub fn move_selection_down(&mut self) {
+        if self.active_panel == Panel::Logs {
+            // Logs uses a free-running scroll offset (paragraph based) rather
+            // than a selected row. Manual scrolling also disengages tail-follow
+            // so the user can read older lines without them being shoved off
+            // the bottom by new entries.
+            self.tail_follow = false;
+            let state = &mut self.panel_states[Panel::Logs as usize];
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+            return;
+        }
         let max = self.active_panel_data_len().saturating_sub(1);
         let state = &mut self.panel_states[self.active_panel as usize];
         if state.selected_index < max {
@@ -300,6 +310,12 @@ impl App {
         }
     }
     pub fn move_selection_up(&mut self) {
+        if self.active_panel == Panel::Logs {
+            self.tail_follow = false;
+            let state = &mut self.panel_states[Panel::Logs as usize];
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+            return;
+        }
         let state = &mut self.panel_states[self.active_panel as usize];
         state.selected_index = state.selected_index.saturating_sub(1);
     }
@@ -684,6 +700,29 @@ mod tests {
         app.move_selection_up();
         assert_eq!(app.panel_states[0].selected_index, 1);
     }
+    #[test]
+    fn test_logs_panel_j_k_scrolls_offset_and_disables_follow() {
+        // On the Logs panel j/k must advance the panel's scroll_offset and
+        // turn off tail_follow so the user can read older entries.
+        let mut app = test_app();
+        app.active_panel = Panel::Logs;
+        app.tail_follow = true;
+
+        app.move_selection_down();
+        app.move_selection_down();
+        app.move_selection_down();
+        assert!(!app.tail_follow, "manual scroll must disable tail_follow");
+        assert_eq!(app.panel_states[Panel::Logs as usize].scroll_offset, 3);
+        assert_eq!(
+            app.panel_states[Panel::Logs as usize].selected_index,
+            0,
+            "selected_index for Logs should stay at 0 — scrolling drives scroll_offset"
+        );
+
+        app.move_selection_up();
+        assert_eq!(app.panel_states[Panel::Logs as usize].scroll_offset, 2);
+    }
+
     #[test]
     fn test_selection_no_underflow() {
         let mut app = test_app();

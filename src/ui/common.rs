@@ -1,10 +1,55 @@
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::{Alignment, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Widget, Wrap,
+    },
 };
+
+/// Draw a vertical scrollbar on the right border of a panel when content
+/// exceeds the viewport. Returns silently when the area is too small or when
+/// `total <= visible` so the bar disappears as the panel grows.
+///
+/// `area` is the full panel rect (including borders). The bar is rendered with
+/// a vertical margin of 1 so the top/bottom border characters stay intact;
+/// the bar's track symbol matches the block border so the right edge looks
+/// continuous and only the thumb stands out.
+///
+/// `position` is the scroll offset of the first visible row (0..=total-visible).
+/// We normalize it for ratatui's Scrollbar so the thumb reaches the bottom of
+/// the track when the last row is shown — ratatui's bar treats the thumb max
+/// as `content_length - 1`, so we feed `(total - visible) + 1` as the content
+/// length and pass `position` directly.
+pub fn render_panel_scrollbar(
+    buf: &mut Buffer,
+    area: Rect,
+    total: usize,
+    visible: usize,
+    position: usize,
+) {
+    if total <= visible || area.height < 3 || area.width < 2 {
+        return;
+    }
+    let scrollable = total.saturating_sub(visible);
+    let content_length = scrollable + 1;
+    let position = position.min(scrollable);
+    let scrollbar_area = area.inner(Margin {
+        vertical: 1,
+        horizontal: 0,
+    });
+    let scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"));
+    let mut state = ScrollbarState::new(content_length)
+        .viewport_content_length(visible)
+        .position(position);
+    StatefulWidget::render(scrollbar, scrollbar_area, buf, &mut state);
+}
 
 pub fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {

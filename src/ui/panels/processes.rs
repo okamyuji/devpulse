@@ -1,11 +1,11 @@
 use crate::app::{ProcessSortColumn, SortDirection};
 use crate::data::processes::ProcessInfo;
-use crate::ui::common::format_bytes;
+use crate::ui::common::{format_bytes, render_panel_scrollbar};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Row, Table, Widget},
+    widgets::{Block, Borders, Row, StatefulWidget, Table, TableState, Widget},
 };
 
 pub struct ProcessesPanel<'a> {
@@ -20,6 +20,15 @@ pub struct ProcessesPanel<'a> {
 
 impl<'a> Widget for ProcessesPanel<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let selected = self.selected;
+        let mut state = TableState::default().with_selected(Some(selected));
+        StatefulWidget::render(self, area, buf, &mut state);
+    }
+}
+
+impl<'a> StatefulWidget for ProcessesPanel<'a> {
+    type State = TableState;
+    fn render(self, area: Rect, buf: &mut Buffer, state: &mut TableState) {
         let title = if self.filter_text.is_empty() {
             " Processes ".to_string()
         } else {
@@ -68,13 +77,7 @@ impl<'a> Widget for ProcessesPanel<'a> {
         let rows: Vec<Row> = self
             .processes
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let style = if i == self.selected {
-                    Style::default().bg(Color::DarkGray)
-                } else {
-                    Style::default()
-                };
+            .map(|p| {
                 let ports = p
                     .listening_ports
                     .iter()
@@ -89,7 +92,6 @@ impl<'a> Widget for ProcessesPanel<'a> {
                     ports,
                     p.command.chars().take(30).collect::<String>(),
                 ])
-                .style(style)
             })
             .collect();
         let table = Table::new(
@@ -104,8 +106,12 @@ impl<'a> Widget for ProcessesPanel<'a> {
             ],
         )
         .header(header)
-        .block(block);
-        Widget::render(table, area, buf);
+        .block(block)
+        .row_highlight_style(Style::default().bg(Color::DarkGray));
+        StatefulWidget::render(table, area, buf, state);
+
+        let visible = (area.height as usize).saturating_sub(3);
+        render_panel_scrollbar(buf, area, self.processes.len(), visible, state.offset());
     }
 }
 
@@ -136,6 +142,60 @@ mod tests {
             sort_direction: SortDirection::Desc,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
-        p.render(Rect::new(0, 0, 80, 10), &mut buf);
+        Widget::render(p, Rect::new(0, 0, 80, 10), &mut buf);
+    }
+
+    #[test]
+    fn test_stateful_render_scrolls_to_keep_selected_visible() {
+        let processes: Vec<ProcessInfo> = (0..50)
+            .map(|i| ProcessInfo {
+                pid: 1000 + i as u32,
+                name: format!("proc-{:02}", i),
+                command: "x".into(),
+                user: "u".into(),
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                threads: 1,
+                parent_pid: Some(1),
+                listening_ports: vec![],
+                start_time: 0,
+            })
+            .collect();
+        let p = ProcessesPanel {
+            processes: &processes,
+            selected: 42,
+            filter_text: "",
+            is_focused: true,
+            tree_mode: false,
+            sort_column: ProcessSortColumn::Cpu,
+            sort_direction: SortDirection::Desc,
+        };
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+        let mut state = TableState::default().with_selected(Some(42)).with_offset(0);
+        StatefulWidget::render(p, area, &mut buf, &mut state);
+        assert!(
+            state.offset() > 0,
+            "expected scroll offset to advance, got {}",
+            state.offset()
+        );
+        let rendered = buf_to_string(&buf);
+        assert!(
+            rendered.contains("proc-42"),
+            "expected selected row 'proc-42' to be visible, got:\n{}",
+            rendered
+        );
+    }
+
+    fn buf_to_string(buf: &Buffer) -> String {
+        let area = buf.area;
+        let mut result = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                result.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            result.push('\n');
+        }
+        result
     }
 }

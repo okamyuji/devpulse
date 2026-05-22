@@ -100,7 +100,7 @@ fn bench_render_overhead() {
     let iterations = 100;
     let start = Instant::now();
     for _ in 0..iterations {
-        terminal.draw(|f| devpulse::ui::draw(f, &app)).unwrap();
+        terminal.draw(|f| devpulse::ui::draw(f, &mut app)).unwrap();
     }
     let elapsed = start.elapsed();
     let per_render = elapsed / iterations;
