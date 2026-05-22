@@ -78,7 +78,8 @@ impl<'a> Widget for LogsPanel<'a> {
             paragraph = paragraph.wrap(Wrap { trim: false });
         }
         if total_lines > 0 && scroll > 0 {
-            paragraph = paragraph.scroll((scroll as u16, 0));
+            let clamped = scroll.min(u16::MAX as usize) as u16;
+            paragraph = paragraph.scroll((clamped, 0));
         }
         Widget::render(paragraph, area, buf);
 
