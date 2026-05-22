@@ -102,6 +102,46 @@ fn test_global_filter_state() {
 }
 
 #[test]
+fn test_draw_updates_scroll_offset_for_offscreen_selection() {
+    // End-to-end check: stuff more rows into the Ports panel than the
+    // rendered area can hold, jump the selection past the visible range,
+    // then render. The Ports panel's PanelState::scroll_offset must move
+    // so the selected row stays visible.
+    use devpulse::data::ports::{PortEntry, Protocol};
+    use devpulse::ui::draw;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::new(Config::default());
+    for i in 0..40 {
+        app.port_entries.push(PortEntry {
+            port: 3000 + i,
+            protocol: Protocol::Tcp,
+            address: "127.0.0.1".into(),
+            pid: 1000 + i as u32,
+            process_name: format!("svc-{:02}", i),
+            command: "x".into(),
+            cpu_percent: 0.0,
+            memory_bytes: 0,
+        });
+    }
+    for _ in 0..35 {
+        app.move_selection_down();
+    }
+    assert_eq!(app.panel_states[Panel::Ports as usize].selected_index, 35);
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+    let offset = app.panel_states[Panel::Ports as usize].scroll_offset;
+    assert!(
+        offset > 0,
+        "expected Ports scroll_offset > 0 after selecting row 35 in a quad layout, got {}",
+        offset
+    );
+}
+
+#[test]
 fn test_action_module() {
     use devpulse::action::Action;
 

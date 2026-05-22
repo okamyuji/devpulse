@@ -1,5 +1,6 @@
 use crate::data::logs::{LogBuffer, LogLevel};
 use crate::filter::FilterState;
+use crate::ui::common::render_panel_scrollbar;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -19,6 +20,8 @@ pub struct LogsPanel<'a> {
     pub is_focused: bool,
     pub tail_follow: bool,
     pub wrap: bool,
+    /// Manual scroll offset (used when `tail_follow` is false).
+    pub scroll_offset: usize,
 }
 
 impl<'a> Widget for LogsPanel<'a> {
@@ -87,16 +90,23 @@ impl<'a> Widget for LogsPanel<'a> {
             })
             .collect();
 
+        let inner_height = (area.height as usize).saturating_sub(2);
+        let max_scroll = lines.len().saturating_sub(inner_height);
+        let scroll = if self.tail_follow {
+            max_scroll
+        } else {
+            self.scroll_offset.min(max_scroll)
+        };
         let mut paragraph = Paragraph::new(lines.clone()).block(block);
         if self.wrap {
             paragraph = paragraph.wrap(Wrap { trim: false });
         }
-        if self.tail_follow && !lines.is_empty() {
-            let inner_height = area.height.saturating_sub(2) as usize;
-            let scroll = lines.len().saturating_sub(inner_height);
+        if !lines.is_empty() && scroll > 0 {
             paragraph = paragraph.scroll((scroll as u16, 0));
         }
         Widget::render(paragraph, area, buf);
+
+        render_panel_scrollbar(buf, area, lines.len(), inner_height, scroll);
     }
 }
 
@@ -141,6 +151,7 @@ mod tests {
             is_focused: true,
             tail_follow: true,
             wrap: false,
+            scroll_offset: 0,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         p.render(Rect::new(0, 0, 60, 10), &mut buf);
@@ -159,6 +170,7 @@ mod tests {
             is_focused: false,
             tail_follow: false,
             wrap: false,
+            scroll_offset: 0,
         };
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
         p.render(Rect::new(0, 0, 60, 10), &mut buf);
@@ -177,6 +189,7 @@ mod tests {
             is_focused: true,
             tail_follow: false,
             wrap: false,
+            scroll_offset: 0,
         };
         // Render and check line count in title_bottom
         let area = Rect::new(0, 0, 80, 20);
@@ -205,6 +218,7 @@ mod tests {
             is_focused: true,
             tail_follow: false,
             wrap: false,
+            scroll_offset: 0,
         };
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
@@ -232,6 +246,7 @@ mod tests {
             is_focused: true,
             tail_follow: false,
             wrap: false,
+            scroll_offset: 0,
         };
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
@@ -258,6 +273,7 @@ mod tests {
             is_focused: true,
             tail_follow: false,
             wrap: false,
+            scroll_offset: 0,
         };
         let area = Rect::new(0, 0, 80, 20);
         let mut buf = Buffer::empty(area);
@@ -267,6 +283,155 @@ mod tests {
             rendered.contains("3 lines"),
             "Expected '3 lines', got: {}",
             rendered
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_visible_when_log_overflow() {
+        let mut buffer = LogBuffer::new(200);
+        for i in 0..50 {
+            buffer.push(LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line {}", i),
+            });
+        }
+        let filter = FilterState::new();
+        let p = LogsPanel {
+            buffer: &buffer,
+            selected: 0,
+            filter_text: "",
+            container_filter: None,
+            log_filter: &filter,
+            is_focused: true,
+            tail_follow: true,
+            wrap: false,
+            scroll_offset: 0,
+        };
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let x = area.x + area.width - 1;
+        let mut col = String::new();
+        for y in area.y..area.y + area.height {
+            col.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        assert!(
+            col.contains('█'),
+            "expected scrollbar thumb on right edge for overflowing logs, got: {:?}",
+            col
+        );
+    }
+
+    #[test]
+    fn test_manual_scroll_offset_shifts_visible_logs() {
+        // tail_follow OFF + scroll_offset > 0 should make the paragraph
+        // skip leading lines so the visible window moves down.
+        let mut buffer = LogBuffer::new(200);
+        for i in 0..40 {
+            buffer.push(LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line-{:02}", i),
+            });
+        }
+        let filter = FilterState::new();
+        let p = LogsPanel {
+            buffer: &buffer,
+            selected: 0,
+            filter_text: "",
+            container_filter: None,
+            log_filter: &filter,
+            is_focused: true,
+            tail_follow: false,
+            wrap: false,
+            scroll_offset: 10,
+        };
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let rendered = buf_to_string(&buf);
+        // Lines 0..9 should be scrolled past, the visible area should show
+        // line-10 onward.
+        assert!(
+            rendered.contains("line-10"),
+            "expected line-10 visible after scrolling 10 down, got:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("line-00"),
+            "expected line-00 to be scrolled off-screen, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_thumb_reaches_bottom_at_last_log() {
+        // With tail_follow ON the paragraph scrolls to the last line; the
+        // scrollbar thumb must end at the bottom-most cell of the bar.
+        let mut buffer = LogBuffer::new(200);
+        for i in 0..40 {
+            buffer.push(LogEntry {
+                timestamp: i,
+                source: "svc".into(),
+                level: LogLevel::Info,
+                message: format!("line-{:02}", i),
+            });
+        }
+        let filter = FilterState::new();
+        let p = LogsPanel {
+            buffer: &buffer,
+            selected: 0,
+            filter_text: "",
+            container_filter: None,
+            log_filter: &filter,
+            is_focused: true,
+            tail_follow: true,
+            wrap: false,
+            scroll_offset: 0,
+        };
+        let area = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let last_y = area.y + area.height - 2;
+        let last_x = area.x + area.width - 1;
+        let cell = buf[(last_x, last_y)].symbol().to_string();
+        assert_eq!(
+            cell, "█",
+            "expected scrollbar thumb on the last bar cell when following the tail, got {:?}",
+            cell
+        );
+    }
+
+    #[test]
+    fn test_scrollbar_hidden_when_logs_fit() {
+        let buffer = make_log_buffer();
+        let filter = FilterState::new();
+        let p = LogsPanel {
+            buffer: &buffer,
+            selected: 0,
+            filter_text: "",
+            container_filter: None,
+            log_filter: &filter,
+            is_focused: true,
+            tail_follow: false,
+            wrap: false,
+            scroll_offset: 0,
+        };
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf);
+        let x = area.x + area.width - 1;
+        let mut col = String::new();
+        for y in area.y..area.y + area.height {
+            col.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        assert!(
+            !col.contains('█'),
+            "expected no scrollbar thumb when logs fit, got: {:?}",
+            col
         );
     }
 
