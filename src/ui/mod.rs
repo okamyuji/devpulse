@@ -11,6 +11,7 @@ use ratatui::Frame;
 use crate::action::Action;
 use crate::app::{App, AppMode};
 use crate::data::docker::ContainerInfo;
+use crate::data::logs::LogEntry;
 use crate::data::ports::PortEntry;
 use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
@@ -129,25 +130,43 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.panel_states[Panel::Processes as usize].scroll_offset = state.offset();
     }
 
-    // Logs panel — uses log-local filter (AND condition) + Docker container filter
+    // Logs panel — uses log-local filter (AND condition) + Docker container filter.
+    // Filtering is done here (once) so both the scroll-offset clamp and the
+    // widget see the same filtered set without duplicating the filter logic.
     let logs_area = panel_areas[Panel::Logs as usize];
     if logs_area.width > 0 && logs_area.height > 0 {
         let container_filter = app.selected_container_name();
-        let filtered_total = app.filtered_log_count();
+        let log_filter_active = app.log_filter.is_active();
+        let filtered_log_entries: Vec<&LogEntry> = app
+            .log_buffer
+            .entries()
+            .iter()
+            .filter(|entry| {
+                if let Some(c) = container_filter.as_deref() {
+                    if entry.source != c {
+                        return false;
+                    }
+                }
+                if log_filter_active {
+                    let text = format!("[{}] {}", entry.source, entry.message);
+                    if !app.log_filter.matches_all_terms(&text) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
         let inner_height = (logs_area.height as usize).saturating_sub(2);
-        let max_scroll = filtered_total.saturating_sub(inner_height);
-        // Clamp persisted manual scroll so it can't exceed the available range
-        // (the user may have pressed `j` past the end before new entries
-        // arrived, or the panel may have grown).
+        let max_scroll = filtered_log_entries.len().saturating_sub(inner_height);
         let logs_state = &mut app.panel_states[Panel::Logs as usize];
         logs_state.scroll_offset = logs_state.scroll_offset.min(max_scroll);
         let scroll_offset = logs_state.scroll_offset;
         let logs_panel = LogsPanel {
-            buffer: &app.log_buffer,
+            entries: &filtered_log_entries,
             selected: logs_state.selected_index,
             filter_text: app.log_filter.query(),
-            container_filter: container_filter.as_deref(),
-            log_filter: &app.log_filter,
+            container_label: container_filter.as_deref(),
             is_focused: app.active_panel == Panel::Logs,
             tail_follow: app.tail_follow,
             wrap: app.wrap_logs,

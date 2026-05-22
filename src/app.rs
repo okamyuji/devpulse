@@ -320,33 +320,6 @@ impl App {
         state.selected_index = state.selected_index.saturating_sub(1);
     }
 
-    /// Count log entries that would be visible in the Logs panel after the
-    /// active container filter and the log panel's local AND filter are
-    /// applied. Mirrors the filter inside `LogsPanel::render` so the draw
-    /// layer can clamp `PanelState::scroll_offset` without reaching into the
-    /// widget.
-    pub fn filtered_log_count(&self) -> usize {
-        let container_filter = self.selected_container_name();
-        self.log_buffer
-            .entries()
-            .iter()
-            .filter(|entry| {
-                if let Some(c) = container_filter.as_deref() {
-                    if entry.source != c {
-                        return false;
-                    }
-                }
-                if self.log_filter.is_active() {
-                    let text = format!("[{}] {}", entry.source, entry.message);
-                    if !self.log_filter.matches_all_terms(&text) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .count()
-    }
-
     /// Cycle sort column forward (`>` key)
     pub fn sort_next(&mut self) {
         match self.active_panel {
