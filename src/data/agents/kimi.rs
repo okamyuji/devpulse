@@ -104,7 +104,13 @@ pub fn parse_state_json(session_id: &str, body: &str) -> Result<AgentSessionRow>
         super::model::StateSource::KimiMetadata,
     );
     row.location = session_id.to_string();
-    row.task_title = Some(title.to_string());
+    // 自動生成タイトル（isCustomTitle=false）はlastPrompt由来でプロンプト内容を
+    // 漏らすため公開しない（会話内容非公開の範囲）。キー欠落は自動生成扱い。
+    let is_custom = root
+        .get("isCustomTitle")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    row.task_title = is_custom.then(|| title.to_string());
     // 不正な時刻文字列は行を保ったままlast_activity_atだけ欠落させる
     row.last_activity_at = updated_at.parse::<chrono::DateTime<chrono::Utc>>().ok();
     row.activity_source = row
@@ -160,7 +166,8 @@ mod tests {
         let row = parse_state_json("session_08280add", WITH_WORKDIR).unwrap();
         assert_eq!(row.id, "session_08280add");
         assert_eq!(row.agent, AgentKind::Kimi);
-        assert_eq!(row.task_title.as_deref(), Some("New Session"));
+        // フィクスチャはisCustomTitle=falseのため自動生成タイトルは公開しない
+        assert!(row.task_title.is_none());
         // workDir → cwd（存在する場合のみ）
         assert_eq!(
             row.cwd,
@@ -187,11 +194,8 @@ mod tests {
     fn parse_state_without_workdir_leaves_cwd_none() {
         let row = parse_state_json("session_03e14dbb", NO_WORKDIR).unwrap();
         assert!(row.cwd.is_none());
-        // 絵文字と日本語を含むタイトル（T3文字種）
-        assert_eq!(
-            row.task_title.as_deref(),
-            Some("kimiコマンドの動作確認をお願いします🚀")
-        );
+        // isCustomTitle=falseのため自動生成タイトル（プロンプト由来）は公開しない
+        assert!(row.task_title.is_none());
     }
 
     #[test]
@@ -205,10 +209,34 @@ mod tests {
     #[test]
     fn parse_state_with_invalid_updated_at_keeps_row_without_activity() {
         // T3: 不正な時刻文字列。行は残しlast_activity_atだけ欠落させる。
-        let body = r#"{"createdAt":"x","updatedAt":"not-a-time","title":"t","isCustomTitle":false,"agents":{"main":{"type":"main"}},"custom":{}}"#;
+        let body = r#"{"createdAt":"x","updatedAt":"not-a-time","title":"t","isCustomTitle":true,"agents":{"main":{"type":"main"}},"custom":{}}"#;
         let row = parse_state_json("session_x", body).unwrap();
         assert!(row.last_activity_at.is_none());
         assert_eq!(row.task_title.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn parse_state_publishes_title_only_when_custom() {
+        // isCustomTitle=trueのユーザー命名タイトルのみ公開する
+        let body = r#"{"updatedAt":"2026-01-01T00:00:00Z","title":"my task","isCustomTitle":true,"agents":{"main":{"type":"main"}}}"#;
+        let row = parse_state_json("s", body).unwrap();
+        assert_eq!(row.task_title.as_deref(), Some("my task"));
+    }
+
+    #[test]
+    fn parse_state_suppresses_auto_generated_title() {
+        // isCustomTitle=falseの自動生成タイトルはlastPrompt由来のため公開しない
+        // （会話内容非公開の範囲。フィクスチャは全てisCustomTitle=false）
+        let row = parse_state_json("session_08280add", WITH_WORKDIR).unwrap();
+        assert!(row.task_title.is_none());
+    }
+
+    #[test]
+    fn parse_state_missing_is_custom_title_treated_as_auto() {
+        // isCustomTitleキー欠落は自動生成扱い（安全側に倒す）
+        let body = r#"{"updatedAt":"2026-01-01T00:00:00Z","title":"leaked prompt","agents":{"main":{"type":"main"}}}"#;
+        let row = parse_state_json("s", body).unwrap();
+        assert!(row.task_title.is_none());
     }
 
     #[test]
@@ -246,7 +274,8 @@ mod tests {
         assert_eq!(broken.agent, AgentKind::Kimi);
         assert!(broken.task_title.as_deref().unwrap().contains("unreadable"));
         let good = rows.iter().find(|r| r.id == "session_good").unwrap();
-        assert_eq!(good.task_title.as_deref(), Some("New Session"));
+        // 正常行は残るが自動生成タイトル（isCustomTitle=false）は公開しない
+        assert!(good.task_title.is_none());
     }
 
     #[cfg(unix)]
@@ -314,7 +343,8 @@ mod tests {
         rows.sort_by(|a, b| a.id.cmp(&b.id));
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].id, "session_aaa");
-        assert_eq!(rows[0].task_title.as_deref(), Some("New Session"));
+        // フィクスチャはisCustomTitle=falseのためタイトルは公開しない
+        assert!(rows[0].task_title.is_none());
         assert_eq!(rows[1].id, "session_bbb");
         assert_eq!(rows[1].child_agents, Some(7));
     }

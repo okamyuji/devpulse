@@ -69,7 +69,7 @@ async fn run_agents_collector(config: &Config) -> anyhow::Result<()> {
         command_timeout_ms: config.agents.command_timeout_ms,
         quiet_threshold_s: config.agents.quiet_threshold_s,
     };
-    let sources = agents::default_sources(&opts);
+    let sources = agents::default_sources_with_owner(&opts, agents::cmux::CursorOwner::Cli);
     let process_source = devpulse::data::processes::SysinfoProcessSource::new();
     let tty_provider = agents::process::PsTtyProvider {
         timeout_ms: opts.command_timeout_ms,
@@ -146,8 +146,14 @@ async fn main() -> anyhow::Result<()> {
     });
     let mut config = Config::load(&config_path)?;
 
-    // agentsサブコマンド: 収集を1回実行しJSONを出して終了（TUIは起動しない）
-    if let Some(Command::Agents { json: _ }) = cli.command {
+    // agentsサブコマンド: 収集を1回実行しJSONを出して終了（TUIは起動しない）。
+    // 契約は`devpulse agents --json`（詳細設計7節）。フラグ無しは誤用として
+    // stdoutを汚さず非0で終了する。
+    if let Some(Command::Agents { json }) = cli.command {
+        if !json {
+            eprintln!("error: `devpulse agents` requires --json (JSON is the only output format)");
+            std::process::exit(2);
+        }
         return run_agents_collector(&config).await;
     }
 

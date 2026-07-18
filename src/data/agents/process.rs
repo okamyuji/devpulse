@@ -26,12 +26,33 @@ impl TtyProvider for PsTtyProvider {
         use super::CommandRunner;
         let out = super::SystemCommandRunner
             .run("ps", &["-axo", "pid=,tty="], self.timeout_ms)
-            .await?;
-        if out.timed_out {
-            anyhow::bail!("ps timed out after {}ms", self.timeout_ms);
-        }
-        Ok(parse_ps_tty(&out.stdout))
+            .await
+            .map_err(|e| super::AgentSourceError::CommandUnavailable {
+                command: "ps".into(),
+                reason: e.to_string(),
+            })?;
+        Ok(tty_map_from_output(&out, self.timeout_ms)?)
     }
+}
+
+/// psの実行結果を検査して解析する。非0終了を「tty無し」と混同しない
+/// （失敗は呼び出し側がwarnログとsource_errorsで可視化し、行はtty欠落のまま組み立てる）。
+pub fn tty_map_from_output(
+    out: &super::CommandOutput,
+    timeout_ms: u64,
+) -> Result<HashMap<u32, String>, super::AgentSourceError> {
+    if out.timed_out {
+        return Err(super::AgentSourceError::Timeout {
+            command: "ps".into(),
+            timeout_ms,
+        });
+    }
+    if !out.success {
+        return Err(super::AgentSourceError::NonZeroExit {
+            command: "ps".into(),
+        });
+    }
+    Ok(parse_ps_tty(&out.stdout))
 }
 
 /// ps -axo pid=,tty= の出力を解析する。制御端末を持たない行（??）は除外する。
@@ -64,15 +85,31 @@ pub fn detect_agent_kind(name: &str, command: &str) -> Option<AgentKind> {
             _ => None,
         }
     }
-    // プロセス名そのもの、またはコマンドライン各トークンのbasenameが
-    // エージェント名に完全一致する場合のみ（部分文字列の誤検出を避ける）
+    /// トークンのbasenameを小文字で返す（完全一致判定用。部分文字列の誤検出を避ける）。
+    fn basename_lower(token: &str) -> String {
+        token.rsplit('/').next().unwrap_or(token).to_lowercase()
+    }
+    /// argv[0]がインタプリタ（node等）のとき、後続のスクリプト位置引数を判定対象にする。
+    const INTERPRETERS: &[&str] = &[
+        "node", "python", "python3", "bash", "sh", "zsh", "deno", "bun", "ruby", "perl",
+    ];
+    // 判定対象は3箇所のみ: プロセス名、argv[0]のbasename、インタプリタ起動時の
+    // スクリプト位置（最初の非フラグ引数）のbasename。任意の引数トークンは見ない
+    // （`grep claude`や`python worker.py kimi`の誤検出を避ける）。
     if let Some(kind) = kind_of(&name.to_lowercase()) {
         return Some(kind);
     }
-    command.split_whitespace().find_map(|token| {
-        let base = token.rsplit('/').next().unwrap_or(token).to_lowercase();
-        kind_of(&base)
-    })
+    let mut tokens = command.split_whitespace();
+    let argv0 = tokens.next()?;
+    let argv0_base = basename_lower(argv0);
+    if let Some(kind) = kind_of(&argv0_base) {
+        return Some(kind);
+    }
+    if !INTERPRETERS.contains(&argv0_base.as_str()) {
+        return None;
+    }
+    let script = tokens.find(|t| !t.starts_with('-'))?;
+    kind_of(&basename_lower(script))
 }
 
 /// エージェントプロセスを統一行モデルの行にする。
@@ -136,6 +173,38 @@ mod tests {
     }
 
     #[test]
+    fn tty_map_from_output_rejects_non_zero_exit_and_timeout() {
+        use crate::data::agents::CommandOutput;
+        // 非0終了は「tty無し」ではなく失敗として返す（照合の静かな縮退を防ぐ）
+        let failed = CommandOutput {
+            stdout: " 42 ttys001\n".into(),
+            timed_out: false,
+            success: false,
+        };
+        let err = tty_map_from_output(&failed, 1000).unwrap_err();
+        assert!(
+            err.to_string().contains("ps exited with failure"),
+            "got: {err}"
+        );
+        // タイムアウトは従来どおり失敗
+        let timed_out = CommandOutput {
+            stdout: String::new(),
+            timed_out: true,
+            success: false,
+        };
+        let err = tty_map_from_output(&timed_out, 1000).unwrap_err();
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        // 成功時は解析結果を返す
+        let ok = CommandOutput {
+            stdout: " 42 ttys001\n".into(),
+            timed_out: false,
+            success: true,
+        };
+        let map = tty_map_from_output(&ok, 1000).unwrap();
+        assert_eq!(map.get(&42).map(String::as_str), Some("ttys001"));
+    }
+
+    #[test]
     fn parse_ps_tty_ignores_garbage_lines() {
         let map = parse_ps_tty("garbage\n abc ttys000\n 42 ttys001\n");
         assert_eq!(map.len(), 1);
@@ -162,6 +231,31 @@ mod tests {
         assert_eq!(detect_agent_kind("zsh", "-zsh"), None);
         // 部分文字列の誤検出をしない（claudia等）
         assert_eq!(detect_agent_kind("claudia", "claudia run"), None);
+    }
+
+    #[test]
+    fn detect_agent_kind_ignores_agent_names_in_arbitrary_argument_positions() {
+        // 引数中の任意トークンをエージェント扱いしない（grepの検索語やスクリプト引数の誤検出防止）
+        assert_eq!(detect_agent_kind("grep", "grep claude"), None);
+        assert_eq!(detect_agent_kind("python", "python worker.py kimi"), None);
+        // インタプリタ起動のスクリプト位置（先頭の非フラグ引数）は判定対象
+        assert_eq!(
+            detect_agent_kind("node", "node /x/.local/bin/claude --continue"),
+            Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            detect_agent_kind("bash", "bash /tmp/claude"),
+            Some(AgentKind::Claude)
+        );
+        // プロセス名そのものは従来どおり判定対象
+        assert_eq!(detect_agent_kind("claude", ""), Some(AgentKind::Claude));
+        // フラグを飛ばした先のスクリプト位置も判定対象
+        assert_eq!(
+            detect_agent_kind("node", "node --enable-source-maps /x/bin/codex"),
+            Some(AgentKind::Codex)
+        );
+        // 非インタプリタのargv[0]では後続引数を見ない
+        assert_eq!(detect_agent_kind("tail", "tail -f claude.log claude"), None);
     }
 
     #[test]

@@ -1,11 +1,11 @@
 //! Claude Code取得元アダプタ（詳細設計4.2節）。
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::model::{AgentKind, AgentSessionRow, Confidence, SessionState, StateSource};
-use super::{AgentSource, CommandRunner};
+use super::{AgentSource, AgentSourceError, CommandRunner};
 
 /// claude agents --json --allの出力を解析するアダプタ。
 pub struct ClaudeAdapter {
@@ -23,12 +23,16 @@ impl ClaudeAdapter {
 ///
 /// 状態対応表（詳細設計4.2節）: blocked→waiting、done→idle、failed→failed、
 /// running→running（事前定義）。対応表にない値はunknownへ落とし生の値をログへ記録する。
-pub fn parse_claude_agents(json: &str) -> Result<Vec<AgentSessionRow>> {
+pub fn parse_claude_agents(json: &str) -> Result<Vec<AgentSessionRow>, AgentSourceError> {
+    let malformed = |reason: &str| AgentSourceError::MalformedOutput {
+        command: "claude agents".into(),
+        reason: reason.into(),
+    };
     let root: serde_json::Value =
-        serde_json::from_str(json).context("claude agents output is not valid JSON")?;
+        serde_json::from_str(json).map_err(|_| malformed("output is not valid JSON"))?;
     let entries = root
         .as_array()
-        .context("claude agents output is not a JSON array")?;
+        .ok_or_else(|| malformed("output is not a JSON array"))?;
     let mut rows = Vec::new();
     for entry in entries {
         // 実出力には2スキーマが混在する（手動検証で実測）。
@@ -119,15 +123,31 @@ impl AgentSource for ClaudeAdapter {
     }
 
     async fn collect(&self) -> Result<Vec<AgentSessionRow>> {
+        Ok(self.collect_rows().await?)
+    }
+}
+
+impl ClaudeAdapter {
+    /// 収集の実体。失敗を型付きエラーで返す（trait境界でanyhowへ変換される）。
+    pub async fn collect_rows(&self) -> Result<Vec<AgentSessionRow>, AgentSourceError> {
         let out = self
             .runner
             .run("claude", &["agents", "--json", "--all"], self.timeout_ms)
-            .await?;
+            .await
+            .map_err(|e| AgentSourceError::CommandUnavailable {
+                command: "claude agents".into(),
+                reason: e.to_string(),
+            })?;
         if out.timed_out {
-            anyhow::bail!("claude agents timed out after {}ms", self.timeout_ms);
+            return Err(AgentSourceError::Timeout {
+                command: "claude agents".into(),
+                timeout_ms: self.timeout_ms,
+            });
         }
         if !out.success {
-            anyhow::bail!("claude agents exited with failure");
+            return Err(AgentSourceError::NonZeroExit {
+                command: "claude agents".into(),
+            });
         }
         parse_claude_agents(&out.stdout)
     }

@@ -30,6 +30,21 @@ pub struct AgentsConfig {
     pub private_store_fallback: bool,
 }
 
+impl AgentsConfig {
+    /// 収集間隔の下限（ミリ秒）。これ未満はビジーループと即時stale判定を招く
+    pub const MIN_REFRESH_MS: u64 = 100;
+    /// 収集間隔の上限（ミリ秒）。鮮度判定が2周期分をi64ミリ秒へ変換するため、
+    /// 2倍してもi64に収まる値で抑える
+    pub const MAX_REFRESH_MS: u64 = (i64::MAX / 2) as u64;
+
+    /// 検証済みの収集間隔。収集ループと鮮度判定は必ずこの値を使う
+    /// （生のrefresh_msを直接使うと両者の判定基準が食い違う）
+    pub fn effective_refresh_ms(&self) -> u64 {
+        self.refresh_ms
+            .clamp(Self::MIN_REFRESH_MS, Self::MAX_REFRESH_MS)
+    }
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -190,6 +205,31 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn effective_refresh_ms_clamps_zero_to_minimum() {
+        let cfg = AgentsConfig {
+            refresh_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_refresh_ms(), 100);
+    }
+
+    #[test]
+    fn effective_refresh_ms_keeps_default_value() {
+        assert_eq!(AgentsConfig::default().effective_refresh_ms(), 5000);
+    }
+
+    #[test]
+    fn effective_refresh_ms_caps_huge_value_below_i64_overflow() {
+        // 鮮度判定は2周期分をi64ミリ秒へ変換するため、2倍してもi64に収まる上限で抑える
+        let cfg = AgentsConfig {
+            refresh_ms: u64::MAX,
+            ..Default::default()
+        };
+        let eff = cfg.effective_refresh_ms();
+        assert!(eff.checked_mul(2).is_some_and(|v| v <= i64::MAX as u64));
+    }
 
     #[test]
     fn test_default_logs_config_has_docker_source() {

@@ -94,6 +94,21 @@ fn agent_session_row_serializes_design_section2_field_names() {
     assert_eq!(value["state_source"], "claude_cli");
 }
 
+/// (c') 契約は`devpulse agents --json`。フラグ無しは非0終了しstdoutは汚さない
+#[test]
+fn agents_without_json_flag_exits_nonzero_with_clean_stdout() {
+    let output = devpulse().arg("agents").output().unwrap();
+    assert!(
+        !output.status.success(),
+        "expected nonzero exit: {output:?}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay clean: {output:?}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--json"));
+}
+
 /// (c) 引数不正は非0終了
 #[test]
 fn agents_unknown_flag_exits_nonzero() {

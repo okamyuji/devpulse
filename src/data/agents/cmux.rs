@@ -1,13 +1,13 @@
 //! cmux取得元アダプタ（詳細設計4.1節）。
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::model::{AgentKind, AgentSessionRow, Orchestrator, StateSource};
-use super::{ActivityEvent, AgentSource, CommandRunner};
+use super::{ActivityEvent, AgentSource, AgentSourceError, CommandRunner};
 
 /// cmuxのtree --all --jsonとevents単発取得を解析するアダプタ。
 pub struct CmuxAdapter {
@@ -24,14 +24,63 @@ impl CmuxAdapter {
             cursor_path,
         }
     }
+
+    /// 収集の実体。失敗を型付きエラーで返す（trait境界でanyhowへ変換される）。
+    pub async fn collect_rows(&self) -> Result<Vec<AgentSessionRow>, AgentSourceError> {
+        let out = self
+            .runner
+            .run("cmux", &["tree", "--all", "--json"], self.timeout_ms)
+            .await
+            .map_err(|e| AgentSourceError::CommandUnavailable {
+                command: "cmux tree".into(),
+                reason: e.to_string(),
+            })?;
+        if out.timed_out {
+            return Err(AgentSourceError::Timeout {
+                command: "cmux tree".into(),
+                timeout_ms: self.timeout_ms,
+            });
+        }
+        if !out.success {
+            return Err(AgentSourceError::NonZeroExit {
+                command: "cmux tree".into(),
+            });
+        }
+        parse_tree(&out.stdout)
+    }
 }
 
-/// events取得カーソルファイルの既定パス（~/.local/share/devpulse/cmux-events-cursor）。
-pub fn default_cursor_path() -> PathBuf {
+/// events取得カーソルの所有者（消費者の識別）。
+/// TUI常駐collectorと一発CLI（devpulse agents --json）が同一カーソルを進めると
+/// 互いのイベントを食い合い、活動の欠落と誤ったquiet判定が起きるため、
+/// 消費者ごとにカーソルファイルを分ける。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorOwner {
+    /// 常駐TUIの背景collector。
+    Tui,
+    /// 一発CLI（devpulse agents --json）。
+    Cli,
+}
+
+impl CursorOwner {
+    fn suffix(self) -> &'static str {
+        match self {
+            CursorOwner::Tui => "tui",
+            CursorOwner::Cli => "cli",
+        }
+    }
+}
+
+/// events取得カーソルファイルの所有者別既定パス
+/// （~/.local/share/devpulse/cmux-events-cursor-{tui,cli}）。
+/// 旧ファイル（接尾辞なしcmux-events-cursor）は参照せず放置してよい。
+/// 新パスは欠如時にseq 0からシードされる既存の初回動作で追いつく。
+pub fn default_cursor_path(owner: CursorOwner) -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
-        .join(".local/share/devpulse/cmux-events-cursor")
+        .join(".local/share/devpulse")
+        .join(format!("cmux-events-cursor-{}", owner.suffix()))
 }
 
 /// カーソルファイルへseq 0を書き込む（親ディレクトリも作る）。失敗しても落とさない
@@ -71,9 +120,12 @@ fn ack_shows_stale_cursor(ndjson: &str) -> bool {
 ///
 /// ノード種別は階層位置（windows/workspaces/panes/surfaces）で決まり、typeキーを
 /// 持つのはsurfaceノードだけである（実測確認済み。T4回帰3）。
-pub fn parse_tree(json: &str) -> Result<Vec<AgentSessionRow>> {
+pub fn parse_tree(json: &str) -> Result<Vec<AgentSessionRow>, AgentSourceError> {
     let root: serde_json::Value =
-        serde_json::from_str(json).context("cmux tree output is not valid JSON")?;
+        serde_json::from_str(json).map_err(|_| AgentSourceError::MalformedOutput {
+            command: "cmux tree".into(),
+            reason: "output is not valid JSON".into(),
+        })?;
     let mut rows = Vec::new();
     let windows = root.get("windows").and_then(|w| w.as_array());
     for window in windows.into_iter().flatten() {
@@ -179,33 +231,32 @@ impl AgentSource for CmuxAdapter {
     }
 
     async fn collect(&self) -> Result<Vec<AgentSessionRow>> {
-        let out = self
-            .runner
-            .run("cmux", &["tree", "--all", "--json"], self.timeout_ms)
-            .await?;
-        if out.timed_out {
-            anyhow::bail!("cmux tree timed out after {}ms", self.timeout_ms);
-        }
-        if !out.success {
-            anyhow::bail!("cmux tree exited with failure");
-        }
-        parse_tree(&out.stdout)
+        Ok(self.collect_rows().await?)
     }
 
-    async fn activity(&self) -> Vec<ActivityEvent> {
-        // 単発取得（ストリーム購読はしない）。カーソルファイル方式で前回の続きから読む
-        // （--after 0はバッファ最古側へ戻り最新の活動が見えなくなる実測があるため禁止）。
-        // 新規イベントの残数が--limit未満のとき上限時間まで待つため、タイムアウト時は
-        // それまでの出力を解析対象とする。
-        // カーソルファイル欠如時のcmuxはライブ購読になり保持イベントを再生しない
-        // （実測確認済み）ため、初回はseq 0をシードして最古から追いつく。
+    async fn activity(&self) -> Result<Vec<ActivityEvent>> {
+        Ok(self.activity_events().await?)
+    }
+}
+
+impl CmuxAdapter {
+    /// 活動イベント取得の実体。失敗を型付きエラーで返す（trait境界でanyhowへ変換される）。
+    ///
+    /// 単発取得（ストリーム購読はしない）。カーソルファイル方式で前回の続きから読む
+    /// （--after 0はバッファ最古側へ戻り最新の活動が見えなくなる実測があるため禁止）。
+    /// 新規イベントの残数が--limit未満のとき上限時間まで待つため、タイムアウト時は
+    /// それまでの出力を解析対象とする（このコマンド固有の意図した縮退）。
+    /// タイムアウトを伴わない非0終了と起動失敗は、空イベントと混同せず失敗として返す。
+    /// カーソルファイル欠如時のcmuxはライブ購読になり保持イベントを再生しない
+    /// （実測確認済み）ため、初回はseq 0をシードして最古から追いつく。
+    pub async fn activity_events(&self) -> Result<Vec<ActivityEvent>, AgentSourceError> {
         if std::fs::metadata(&self.cursor_path).is_err() {
             seed_cursor(&self.cursor_path);
         }
         let cursor_arg = self.cursor_path.to_string_lossy().into_owned();
         // ackフレームは残す（--no-ackを付けない）: resume情報でstaleカーソルを検出する。
         // ackはoccurred_atを持たずparse_eventsが自然に無視する。
-        match self
+        let out = self
             .runner
             .run(
                 "cmux",
@@ -220,17 +271,21 @@ impl AgentSource for CmuxAdapter {
                 self.timeout_ms,
             )
             .await
-        {
-            Ok(out) => {
-                if ack_shows_stale_cursor(&out.stdout) {
-                    // cmux再起動でseqが巻き戻った。次周期に再生できるようseq 0へ戻す。
-                    tracing::debug!("cmux events cursor is stale (cmux restarted); resetting");
-                    seed_cursor(&self.cursor_path);
-                }
-                parse_events(&out.stdout)
-            }
-            Err(_) => Vec::new(),
+            .map_err(|e| AgentSourceError::CommandUnavailable {
+                command: "cmux events".into(),
+                reason: e.to_string(),
+            })?;
+        if !out.success && !out.timed_out {
+            return Err(AgentSourceError::NonZeroExit {
+                command: "cmux events".into(),
+            });
         }
+        if ack_shows_stale_cursor(&out.stdout) {
+            // cmux再起動でseqが巻き戻った。次周期に再生できるようseq 0へ戻す。
+            tracing::debug!("cmux events cursor is stale (cmux restarted); resetting");
+            seed_cursor(&self.cursor_path);
+        }
+        Ok(parse_events(&out.stdout))
     }
 }
 
@@ -251,6 +306,25 @@ mod tests {
     const TREE_FIXTURE: &str = include_str!("fixtures/cmux_tree.json");
     const EVENTS_FIXTURE: &str = include_str!("fixtures/cmux_events.jsonl");
     const EVENTS_TRUNCATED_FIXTURE: &str = include_str!("fixtures/cmux_events_truncated.jsonl");
+
+    #[test]
+    fn default_cursor_path_is_distinct_per_consumer_owner() {
+        // TUI常駐collectorと一発CLIが同じカーソルを進めると互いのイベントを
+        // 食い合うため、消費者ごとにカーソルファイルを分ける。
+        let tui = default_cursor_path(CursorOwner::Tui);
+        let cli = default_cursor_path(CursorOwner::Cli);
+        assert_ne!(tui, cli);
+        assert!(
+            tui.to_string_lossy().ends_with("cmux-events-cursor-tui"),
+            "got: {}",
+            tui.display()
+        );
+        assert!(
+            cli.to_string_lossy().ends_with("cmux-events-cursor-cli"),
+            "got: {}",
+            cli.display()
+        );
+    }
 
     #[test]
     fn parse_tree_extracts_terminal_surfaces_with_tty_and_title() {
@@ -446,8 +520,46 @@ mod tests {
             1000,
             test_cursor_path("partial-stream"),
         );
-        let events = adapter.activity().await;
+        let events = adapter.activity().await.unwrap();
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn adapter_activity_rejects_non_zero_exit_without_timeout() {
+        // タイムアウト以外の非0終了は「イベント0件」ではなく失敗として返す
+        // （失敗を空活動と混同するとquiet判定が誤る）。
+        let adapter = CmuxAdapter::new(
+            Arc::new(MockRunner {
+                exists: true,
+                output: Ok(CommandOutput {
+                    stdout: String::new(),
+                    timed_out: false,
+                    success: false,
+                }),
+            }),
+            1000,
+            test_cursor_path("activity-nonzero"),
+        );
+        let err = adapter.activity().await.unwrap_err();
+        assert!(
+            err.to_string().contains("cmux events exited with failure"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_activity_rejects_runner_error() {
+        // 起動失敗も失敗として返す（従来は握りつぶして空を返していた）
+        let adapter = CmuxAdapter::new(
+            Arc::new(MockRunner {
+                exists: true,
+                output: Err("failed to spawn cmux".into()),
+            }),
+            1000,
+            test_cursor_path("activity-spawn-fail"),
+        );
+        let err = adapter.activity().await.unwrap_err();
+        assert!(err.to_string().contains("failed to run"), "got: {err}");
     }
 
     struct RecordingRunner {
@@ -482,7 +594,7 @@ mod tests {
         });
         let adapter = CmuxAdapter::new(runner.clone(), 1000, test_cursor_path("legacy-alias"));
         adapter.collect().await.unwrap();
-        adapter.activity().await;
+        adapter.activity().await.unwrap();
         let calls = runner.calls.lock().unwrap().clone();
         assert_eq!(calls[0], vec!["cmux", "tree", "--all", "--json"]);
         assert_eq!(calls[1][0], "cmux");
@@ -505,7 +617,7 @@ mod tests {
             stdout: String::new(),
         });
         let adapter = CmuxAdapter::new(runner.clone(), 1000, cursor.clone());
-        adapter.activity().await;
+        adapter.activity().await.unwrap();
         let calls = runner.calls.lock().unwrap().clone();
         assert_eq!(
             calls[0],
@@ -538,7 +650,7 @@ mod tests {
             stdout: format!("{stale_ack}\n"),
         });
         let adapter = CmuxAdapter::new(runner, 1000, cursor.clone());
-        let events = adapter.activity().await;
+        let events = adapter.activity().await.unwrap();
         assert!(events.is_empty(), "ackフレームはイベントとして解析しない");
         assert_eq!(
             std::fs::read_to_string(&cursor).unwrap().trim(),

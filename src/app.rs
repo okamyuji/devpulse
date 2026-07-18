@@ -436,6 +436,10 @@ impl App {
     }
     /// Processes枠のビューを交互に切り替える（詳細設計8.1節、aキー）。
     pub fn toggle_processes_view(&mut self) {
+        // agents.enabled=false時はエージェントビューへ入らない（Processes据え置き）
+        if !self.config.agents.enabled && self.processes_view == ProcessesViewMode::Processes {
+            return;
+        }
         self.processes_view = match self.processes_view {
             ProcessesViewMode::Processes => ProcessesViewMode::AgentSessions,
             ProcessesViewMode::AgentSessions => ProcessesViewMode::Processes,
@@ -474,7 +478,8 @@ impl App {
     }
     pub fn move_selection_down(&mut self) {
         if self.agents_view_active() {
-            let max = self.agent_sessions_len().saturating_sub(1);
+            // 選択移動の上限は描画と同じフィルタ後の行数（全行数だと非表示行へはみ出す）
+            let max = self.visible_agent_rows().len().saturating_sub(1);
             let state = &mut self.agents_panel_state;
             if state.selected_index < max {
                 state.selected_index += 1;
@@ -708,8 +713,9 @@ impl App {
                 self.panel_states[i].selected_index = len - 1;
             }
         }
-        // エージェントセッションビューの選択クランプ（詳細設計8.1節の分岐対象）
-        let agents_len = self.agent_sessions_len();
+        // エージェントセッションビューの選択クランプ（詳細設計8.1節の分岐対象）。
+        // 描画と同じフィルタ後の行数を基準にする
+        let agents_len = self.visible_agent_rows().len();
         let state = &mut self.agents_panel_state;
         if agents_len == 0 {
             state.selected_index = 0;
@@ -740,7 +746,11 @@ impl App {
     /// 未取得（起動直後や無効化時）は停止表示の対象にしない。
     pub fn agents_snapshot_stale(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
         match &self.agents_snapshot {
-            Some(s) => is_snapshot_stale(s.collected_at, now, self.config.agents.refresh_ms),
+            Some(s) => is_snapshot_stale(
+                s.collected_at,
+                now,
+                self.config.agents.effective_refresh_ms(),
+            ),
             None => false,
         }
     }
@@ -913,7 +923,7 @@ fn spawn_agent_collector(cfg: crate::config::AgentsConfig) -> mpsc::Receiver<Age
             command_timeout_ms: cfg.command_timeout_ms,
             quiet_threshold_s: cfg.quiet_threshold_s,
         };
-        let sources = agents::default_sources(&opts);
+        let sources = agents::default_sources_with_owner(&opts, agents::cmux::CursorOwner::Tui);
         let process_source = crate::data::processes::SysinfoProcessSource::new();
         let tty_provider = agents::process::PsTtyProvider {
             timeout_ms: opts.command_timeout_ms,
@@ -935,7 +945,8 @@ fn spawn_agent_collector(cfg: crate::config::AgentsConfig) -> mpsc::Receiver<Age
             if tx.send(snapshot).await.is_err() {
                 break; // 受信側（App）が破棄されたら終了する
             }
-            tokio::time::sleep(std::time::Duration::from_millis(cfg.refresh_ms.max(100))).await;
+            // 収集ループと鮮度判定で同一の検証済み間隔を使う（食い違うと即時stale化する）
+            tokio::time::sleep(std::time::Duration::from_millis(cfg.effective_refresh_ms())).await;
         }
     });
     rx
@@ -1383,6 +1394,72 @@ mod agents_view_tests {
             3
         );
         // エージェント側の選択も保持される
+        assert_eq!(app.agents_panel_state.selected_index, 1);
+    }
+
+    #[test]
+    fn fresh_snapshot_is_not_stale_when_refresh_ms_is_zero() {
+        // refresh_ms=0でも検証済み間隔（下限100ms）で判定し、直後の鮮度判定を即staleにしない
+        let mut app = test_app();
+        app.config.agents.refresh_ms = 0;
+        app.agents_snapshot = Some(snapshot_of(vec![]));
+        assert!(!app.agents_snapshot_stale(Utc::now()));
+    }
+
+    #[test]
+    fn huge_refresh_ms_does_not_wrap_staleness_math() {
+        // u64::MAXをi64へ変換しても負値へ回り込まない（回り込むと常にstale扱いになる）
+        let mut app = test_app();
+        app.config.agents.refresh_ms = u64::MAX;
+        app.agents_snapshot = Some(AgentsSnapshot {
+            collected_at: Utc::now() - chrono::Duration::seconds(3600),
+            sessions: vec![],
+            source_errors: vec![],
+        });
+        assert!(!app.agents_snapshot_stale(Utc::now()));
+    }
+
+    #[test]
+    fn toggle_refuses_agent_view_when_agents_disabled() {
+        // agents.enabled=false時はaトグルでもエージェントビューへ入らない
+        let mut app = test_app();
+        app.config.agents.enabled = false;
+        app.toggle_processes_view();
+        assert_eq!(app.processes_view, ProcessesViewMode::Processes);
+    }
+
+    #[test]
+    fn selection_bounded_by_filtered_rows() {
+        // 選択移動の上限は全行数ではなくフィルタ後の可視行数
+        let mut app = app_with_rows(vec![
+            arow("a", AgentKind::Claude, "alpha one", "ws:1", 1.0),
+            arow("b", AgentKind::Claude, "alpha two", "ws:2", 1.0),
+            arow("c", AgentKind::Claude, "beta", "ws:3", 1.0),
+            arow("d", AgentKind::Claude, "gamma", "ws:4", 1.0),
+            arow("e", AgentKind::Claude, "delta", "ws:5", 1.0),
+        ]);
+        app.active_panel = Panel::Processes;
+        app.toggle_processes_view();
+        app.global_filter.set_query("alpha");
+        for _ in 0..4 {
+            app.move_selection_down();
+        }
+        assert_eq!(app.agents_panel_state.selected_index, 1);
+    }
+
+    #[test]
+    fn filter_change_clamps_out_of_range_selection() {
+        // フィルタ編集で可視行数が減ったら選択はフィルタ後の末尾へクランプされる
+        let mut app = app_with_rows(vec![
+            arow("a", AgentKind::Claude, "alpha one", "ws:1", 1.0),
+            arow("b", AgentKind::Claude, "alpha two", "ws:2", 1.0),
+            arow("c", AgentKind::Claude, "beta", "ws:3", 1.0),
+            arow("d", AgentKind::Claude, "gamma", "ws:4", 1.0),
+            arow("e", AgentKind::Claude, "delta", "ws:5", 1.0),
+        ]);
+        app.agents_panel_state.selected_index = 4;
+        app.global_filter.set_query("alpha");
+        app.clamp_selections();
         assert_eq!(app.agents_panel_state.selected_index, 1);
     }
 

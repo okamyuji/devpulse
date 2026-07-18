@@ -5,13 +5,44 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 /// エージェントの種別。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentKind {
     Claude,
     Codex,
     Kimi,
     Other(String),
+}
+
+impl AgentKind {
+    /// JSON契約上の文字列表現。Otherは中身の文字列そのもの。
+    pub fn as_str(&self) -> &str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+            AgentKind::Kimi => "kimi",
+            AgentKind::Other(s) => s,
+        }
+    }
+}
+
+// agentフィールドは常にフラット文字列で直列化する（deriveだとOtherが
+// {"other":"..."}のオブジェクトになりJSON契約を壊すため手書きする）。
+impl Serialize for AgentKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "claude" => AgentKind::Claude,
+            "codex" => AgentKind::Codex,
+            "kimi" => AgentKind::Kimi,
+            _ => AgentKind::Other(s),
+        })
+    }
 }
 
 /// セッションを実行しているオーケストレータ。MVPで生成するのはCmuxとUnknownのみ。
@@ -185,6 +216,36 @@ mod tests {
         assert_eq!(obj["confidence"], "derived");
         assert_eq!(obj["pid"], 91658);
         assert_eq!(obj["tty"], "ttys000");
+    }
+
+    #[test]
+    fn agent_kind_serializes_every_variant_as_plain_string() {
+        // JSON契約: agentフィールドは常にフラット文字列（Otherもオブジェクトにしない）
+        for (kind, expected) in [
+            (AgentKind::Claude, "claude"),
+            (AgentKind::Codex, "codex"),
+            (AgentKind::Kimi, "kimi"),
+            (AgentKind::Other("foo".into()), "foo"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&kind).unwrap(),
+                serde_json::json!(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn agent_kind_round_trips_through_json() {
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Kimi,
+            AgentKind::Other("unknown".into()),
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: AgentKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 
     #[test]

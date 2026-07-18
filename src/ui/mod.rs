@@ -136,6 +136,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ProcessesViewMode::AgentSessions => {
                 // 描画用複製（フィルタ+ソート済み）。共有スナップショットは変更しない。
                 let agent_rows = app.visible_agent_rows();
+                // フィルタ編集直後でも選択が可視行数を越えないよう描画直前にクランプする
+                if app.agents_panel_state.selected_index >= agent_rows.len() {
+                    app.agents_panel_state.selected_index = agent_rows.len().saturating_sub(1);
+                }
                 let selected = app.agents_panel_state.selected_index;
                 let offset = app.agents_panel_state.scroll_offset;
                 let (source_errors, collected_at) = match app.agents_snapshot.as_ref() {
@@ -292,14 +296,20 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
         Panel::Processes if app.processes_view == ProcessesViewMode::AgentSessions => {
             vec![("a", "Procs"), (",/.", "Sort"), ("S", "Sort Dir")]
         }
-        Panel::Processes => vec![
-            ("K", "Kill"),
-            ("Ctrl+K", "Force Kill"),
-            ("t", "Tree"),
-            (",/.", "Sort"),
-            ("S", "Sort Dir"),
-            ("a", "Agents"),
-        ],
+        Panel::Processes => {
+            let mut hints = vec![
+                ("K", "Kill"),
+                ("Ctrl+K", "Force Kill"),
+                ("t", "Tree"),
+                (",/.", "Sort"),
+                ("S", "Sort Dir"),
+            ];
+            // agents.enabled=false時はaトグル自体が無効のためヒントを出さない
+            if app.config.agents.enabled {
+                hints.push(("a", "Agents"));
+            }
+            hints
+        }
         Panel::Logs => vec![("f", "Filter"), ("F", "Follow"), ("w", "Wrap")],
     };
 
@@ -963,6 +973,59 @@ mod tests {
                 "aキーは{panel:?}では無効"
             );
         }
+    }
+
+    #[test]
+    fn test_a_key_is_noop_when_agents_disabled() {
+        // agents.enabled=false時はaキーでもエージェントビューへ入らない
+        let mut app = App::new(Config::default());
+        app.config.agents.enabled = false;
+        app.active_panel = Panel::Processes;
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(app.processes_view, ProcessesViewMode::Processes);
+    }
+
+    #[test]
+    fn test_status_line_hides_agents_hint_when_disabled() {
+        // agents.enabled=false時はaトグルのヒントを出さない
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.config.agents.enabled = false;
+        app.active_panel = Panel::Processes;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !text.contains("Agents"),
+            "aトグルのヒントが表示されている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_draw_clamps_agent_selection_to_filtered_rows() {
+        // フィルタ編集直後の描画で選択が可視行数内へクランプされる
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        app.processes_view = ProcessesViewMode::AgentSessions;
+        set_agent_snapshot(
+            &mut app,
+            vec![
+                agent_row("a", "alpha one"),
+                agent_row("b", "alpha two"),
+                agent_row("c", "beta"),
+                agent_row("d", "gamma"),
+                agent_row("e", "delta"),
+            ],
+        );
+        app.agents_panel_state.selected_index = 4;
+        app.global_filter.set_query("alpha");
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.agents_panel_state.selected_index, 1);
     }
 
     #[test]

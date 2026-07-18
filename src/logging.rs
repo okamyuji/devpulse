@@ -24,11 +24,18 @@ pub fn init() -> Option<WorkerGuard> {
 /// を返すだけでパニックしない（要件: ログなしでも起動継続）。
 pub fn init_at(dir: &Path) -> Option<WorkerGuard> {
     std::fs::create_dir_all(dir).ok()?;
+    // セッションパスを含むログを他ローカルユーザーへ露出させない（所有者のみ）。
+    // 既存の緩い権限も初期化時に締め直す。失敗しても起動は継続する。
+    #[cfg(unix)]
+    restrict_permissions(dir, 0o700);
+    let log_path = dir.join("devpulse.log");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("devpulse.log"))
+        .open(&log_path)
         .ok()?;
+    #[cfg(unix)]
+    restrict_permissions(&log_path, 0o600);
     let (writer, guard) = tracing_appender::non_blocking(file);
     let filter = tracing_subscriber::EnvFilter::try_from_env("DEVPULSE_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -39,6 +46,13 @@ pub fn init_at(dir: &Path) -> Option<WorkerGuard> {
         .finish();
     tracing::subscriber::set_global_default(subscriber).ok()?;
     Some(guard)
+}
+
+/// 所有者のみのモードへ権限を絞る（失敗は無視。非パニック契約の維持）。
+#[cfg(unix)]
+fn restrict_permissions(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
 }
 
 /// テスト専用のイベント収集レイヤー（外部crate不使用の最小実装）。
@@ -152,6 +166,45 @@ mod tests {
         // /dev/null配下はディレクトリを作れないため必ず失敗する
         let result = init_at(Path::new("/dev/null/devpulse-test-cannot-exist"));
         assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_at_creates_owner_only_dir_and_file() {
+        use std::os::unix::fs::PermissionsExt;
+        // セッションパスを含むログを他ローカルユーザーへ露出させない
+        // （ディレクトリ0700・ファイル0600。返り値はグローバル登録競合で
+        // Noneになり得るため権限のみ検証する）
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let _guard = init_at(&dir);
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let file_mode = std::fs::metadata(dir.join("devpulse.log"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_at_tightens_preexisting_world_readable_dir_and_file() {
+        use std::os::unix::fs::PermissionsExt;
+        // 既存の緩い権限（0755/0644）も初期化時に締め直す
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("devpulse.log");
+        std::fs::write(&file, b"old\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _guard = init_at(&dir);
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600);
     }
 
     #[test]
