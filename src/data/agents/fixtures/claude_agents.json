@@ -1,0 +1,56 @@
+[
+  {
+    "id": "6c428b96",
+    "cwd": "/Users/dev/devs/zenn",
+    "kind": "background",
+    "startedAt": 1783128114826,
+    "sessionId": "6c428b96-4d4f-47db-bd4a-adf7164f552f",
+    "name": "AWS MySQL consistency patterns の論理構成レビュー",
+    "state": "failed"
+  },
+  {
+    "id": "32d73388",
+    "cwd": "/Users/dev/devs/golang/primary-guard-ec-htmx-go",
+    "kind": "background",
+    "startedAt": 1783731709727,
+    "sessionId": "32d73388-d5eb-4629-98d6-9ac75e670612",
+    "name": "ci-rebuild-large-file-upload",
+    "state": "failed"
+  },
+  {
+    "id": "9a1cb8e0",
+    "cwd": "/Users/dev/devs/swift/large-file-upload",
+    "kind": "background",
+    "startedAt": 1783757092574,
+    "sessionId": "9a1cb8e0-ca60-4bc5-b6f9-37e1408ab063",
+    "name": "fix-session-persistence-force-quit",
+    "state": "failed"
+  },
+  {
+    "id": "7229bfc2",
+    "cwd": "/Users/dev",
+    "kind": "background",
+    "startedAt": 1783826851610,
+    "sessionId": "7229bfc2-b9d9-4566-9422-a7bf191e05df",
+    "name": "病院向けインシデント報告システムの要件定義",
+    "state": "failed"
+  },
+  {
+    "id": "c39a9600",
+    "cwd": "/Users/dev/devs/zenn",
+    "kind": "background",
+    "startedAt": 1784326753547,
+    "sessionId": "c39a9600-dab6-41b2-ac1e-5f8aaca05025",
+    "name": "GitHub reusable workflows のタイトル案を検討",
+    "state": "done"
+  },
+  {
+    "id": "311b1c16",
+    "cwd": "/Users/dev",
+    "kind": "background",
+    "startedAt": 1784329656386,
+    "sessionId": "311b1c16-943f-44de-a966-8e7452fbf52f",
+    "name": "webgrab スキルと WebFetch のベンチマーク測定",
+    "state": "blocked"
+  }
+]

@@ -9,7 +9,7 @@ use ratatui::widgets::TableState;
 use ratatui::Frame;
 
 use crate::action::Action;
-use crate::app::{App, AppMode};
+use crate::app::{App, AppMode, ProcessesViewMode};
 use crate::data::docker::ContainerInfo;
 use crate::data::logs::LogEntry;
 use crate::data::ports::PortEntry;
@@ -17,6 +17,7 @@ use crate::data::processes::ProcessInfo;
 use crate::event::Panel;
 use crate::ui::common::{ConfirmDialog, ErrorOverlay, HelpOverlay};
 use crate::ui::layout::{compute_layout, LayoutMode};
+use crate::ui::panels::agents::AgentsPanel;
 use crate::ui::panels::docker::DockerPanel;
 use crate::ui::panels::logs::LogsPanel;
 use crate::ui::panels::ports::PortsPanel;
@@ -109,25 +110,60 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.panel_states[Panel::Docker as usize].scroll_offset = state.offset();
     }
 
-    // Processes panel
+    // Processes panel — Processes枠はビュー切り替え制（詳細設計8.1節）。
+    // レイアウト・パネルインデックスは不変のまま、枠内の描画のみ分岐する。
     let processes_area = panel_areas[Panel::Processes as usize];
     if processes_area.width > 0 && processes_area.height > 0 {
-        let selected = app.panel_states[Panel::Processes as usize].selected_index;
-        let offset = app.panel_states[Panel::Processes as usize].scroll_offset;
-        let processes_panel = ProcessesPanel {
-            processes: &filtered_processes,
-            selected,
-            filter_text,
-            is_focused: app.active_panel == Panel::Processes,
-            tree_mode: app.tree_mode,
-            sort_column: app.process_sort,
-            sort_direction: app.process_sort_dir,
-        };
-        let mut state = TableState::default()
-            .with_selected(Some(selected))
-            .with_offset(offset);
-        frame.render_stateful_widget(processes_panel, processes_area, &mut state);
-        app.panel_states[Panel::Processes as usize].scroll_offset = state.offset();
+        match app.processes_view {
+            ProcessesViewMode::Processes => {
+                let selected = app.panel_states[Panel::Processes as usize].selected_index;
+                let offset = app.panel_states[Panel::Processes as usize].scroll_offset;
+                let processes_panel = ProcessesPanel {
+                    processes: &filtered_processes,
+                    selected,
+                    filter_text,
+                    is_focused: app.active_panel == Panel::Processes,
+                    tree_mode: app.tree_mode,
+                    sort_column: app.process_sort,
+                    sort_direction: app.process_sort_dir,
+                };
+                let mut state = TableState::default()
+                    .with_selected(Some(selected))
+                    .with_offset(offset);
+                frame.render_stateful_widget(processes_panel, processes_area, &mut state);
+                app.panel_states[Panel::Processes as usize].scroll_offset = state.offset();
+            }
+            ProcessesViewMode::AgentSessions => {
+                // 描画用複製（フィルタ+ソート済み）。共有スナップショットは変更しない。
+                let agent_rows = app.visible_agent_rows();
+                // フィルタ編集直後でも選択が可視行数を越えないよう描画直前にクランプする
+                if app.agents_panel_state.selected_index >= agent_rows.len() {
+                    app.agents_panel_state.selected_index = agent_rows.len().saturating_sub(1);
+                }
+                let selected = app.agents_panel_state.selected_index;
+                let offset = app.agents_panel_state.scroll_offset;
+                let (source_errors, collected_at) = match app.agents_snapshot.as_ref() {
+                    Some(s) => (s.source_errors.as_slice(), Some(s.collected_at)),
+                    None => (&[][..], None),
+                };
+                let agents_panel = AgentsPanel {
+                    rows: &agent_rows,
+                    selected,
+                    filter_text,
+                    is_focused: app.active_panel == Panel::Processes,
+                    sort_column: app.agent_sort,
+                    sort_direction: app.agent_sort_dir,
+                    source_errors,
+                    collected_at,
+                    stale: app.agents_snapshot_stale(chrono::Utc::now()),
+                };
+                let mut state = TableState::default()
+                    .with_selected(Some(selected))
+                    .with_offset(offset);
+                frame.render_stateful_widget(agents_panel, processes_area, &mut state);
+                app.agents_panel_state.scroll_offset = state.offset();
+            }
+        }
     }
 
     // Logs panel — uses log-local filter (AND condition) + Docker container filter.
@@ -235,7 +271,10 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
     let panel_name = match app.active_panel {
         Panel::Ports => "Ports",
         Panel::Docker => "Docker",
-        Panel::Processes => "Processes",
+        Panel::Processes => match app.processes_view {
+            ProcessesViewMode::Processes => "Processes",
+            ProcessesViewMode::AgentSessions => "Agents",
+        },
         Panel::Logs => "Logs",
     };
 
@@ -253,13 +292,24 @@ fn build_status_line<'a>(app: &App) -> ratatui::widgets::Paragraph<'a> {
             ("R", "Restart"),
             ("r", "Remove"),
         ],
-        Panel::Processes => vec![
-            ("K", "Kill"),
-            ("Ctrl+K", "Force Kill"),
-            ("t", "Tree"),
-            (",/.", "Sort"),
-            ("S", "Sort Dir"),
-        ],
+        // エージェントセッションビューは読み取り専用のため操作系ヒントを出さない（8.3節）
+        Panel::Processes if app.processes_view == ProcessesViewMode::AgentSessions => {
+            vec![("a", "Procs"), (",/.", "Sort"), ("S", "Sort Dir")]
+        }
+        Panel::Processes => {
+            let mut hints = vec![
+                ("K", "Kill"),
+                ("Ctrl+K", "Force Kill"),
+                ("t", "Tree"),
+                (",/.", "Sort"),
+                ("S", "Sort Dir"),
+            ];
+            // agents.enabled=false時はaトグル自体が無効のためヒントを出さない
+            if app.config.agents.enabled {
+                hints.push(("a", "Agents"));
+            }
+            hints
+        }
         Panel::Logs => vec![("f", "Filter"), ("F", "Follow"), ("w", "Wrap")],
     };
 
@@ -381,6 +431,13 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
             app.select_panel_or_fullscreen(3);
             true
         }
+        KeyCode::Char('a') => {
+            // Processes枠のビュー切り替え（詳細設計8.1節）。他パネルでは無効。
+            if app.active_panel == Panel::Processes {
+                app.toggle_processes_view();
+            }
+            true
+        }
         KeyCode::Char('K') => {
             // K = SIGTERM, Ctrl+K = SIGKILL (force)
             let force = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -392,6 +449,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> bool {
                         app.pending_action = Some(action);
                         app.mode = AppMode::Confirm;
                     }
+                }
+                // エージェントセッションビューは読み取り専用（詳細設計8.3節）:
+                // 表示中は操作系キーを無効とし、何も実行しない。
+                Panel::Processes if app.processes_view == ProcessesViewMode::AgentSessions => {
+                    tracing::info!(key = "K", "action key ignored in agent sessions view");
                 }
                 Panel::Processes => {
                     if let Some(pid) = app.selected_process_pid() {
@@ -587,6 +649,22 @@ mod tests {
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
+    }
+
+    #[test]
+    fn disabled_action_key_in_agent_view_emits_info_event() {
+        let cap = crate::logging::capture::Capture::new();
+        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        app.toggle_processes_view();
+        handle_key(&mut app, make_key(KeyCode::Char('K')));
+        assert!(app.pending_action.is_none(), "action must stay disabled");
+        let ev = cap
+            .find("action key ignored in agent sessions view")
+            .expect("ignored-key event emitted");
+        assert_eq!(ev.level, tracing::Level::INFO);
+        assert!(ev.fields.contains("key=K"), "{}", ev.fields);
     }
 
     #[test]
@@ -830,6 +908,227 @@ mod tests {
             "no such image".to_string(),
             vec!["pull access denied".to_string()],
         );
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+
+    // ---- エージェントセッションビュー（詳細設計8.1〜8.3節、テスト計画10節） ----
+
+    use crate::app::ProcessesViewMode;
+    use crate::data::agents::model::{AgentKind, AgentSessionRow, StateSource};
+    use crate::data::agents::AgentsSnapshot;
+
+    fn agent_row(id: &str, task: &str) -> AgentSessionRow {
+        let mut r = AgentSessionRow::new(id, AgentKind::Claude, StateSource::ClaudeCli);
+        r.task_title = Some(task.to_string());
+        r.location = format!("loc-{id}");
+        r
+    }
+
+    fn set_agent_snapshot(app: &mut App, rows: Vec<AgentSessionRow>) {
+        app.agents_snapshot = Some(AgentsSnapshot {
+            collected_at: chrono::Utc::now(),
+            sessions: rows,
+            source_errors: vec![],
+        });
+    }
+
+    fn push_procs(app: &mut App, n: usize) {
+        use crate::data::processes::ProcessInfo;
+        for i in 0..n {
+            app.process_list.push(ProcessInfo {
+                pid: 100 + i as u32,
+                name: format!("p{i}"),
+                command: "cmd".into(),
+                user: String::new(),
+                cpu_percent: 0.0,
+                memory_bytes: 0,
+                threads: 0,
+                parent_pid: None,
+                listening_ports: vec![],
+                start_time: 0,
+                cwd: None,
+            });
+        }
+    }
+
+    #[test]
+    fn test_a_key_toggles_agent_view_on_processes_panel() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(app.processes_view, ProcessesViewMode::AgentSessions);
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(app.processes_view, ProcessesViewMode::Processes);
+    }
+
+    #[test]
+    fn test_a_key_is_noop_on_other_panels() {
+        let mut app = App::new(Config::default());
+        for panel in [Panel::Ports, Panel::Docker, Panel::Logs] {
+            app.active_panel = panel;
+            handle_key(&mut app, make_key(KeyCode::Char('a')));
+            assert_eq!(
+                app.processes_view,
+                ProcessesViewMode::Processes,
+                "aキーは{panel:?}では無効"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_key_is_noop_when_agents_disabled() {
+        // agents.enabled=false時はaキーでもエージェントビューへ入らない
+        let mut app = App::new(Config::default());
+        app.config.agents.enabled = false;
+        app.active_panel = Panel::Processes;
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(app.processes_view, ProcessesViewMode::Processes);
+    }
+
+    #[test]
+    fn test_status_line_hides_agents_hint_when_disabled() {
+        // agents.enabled=false時はaトグルのヒントを出さない
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.config.agents.enabled = false;
+        app.active_panel = Panel::Processes;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(
+            !text.contains("Agents"),
+            "aトグルのヒントが表示されている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_draw_clamps_agent_selection_to_filtered_rows() {
+        // フィルタ編集直後の描画で選択が可視行数内へクランプされる
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        app.processes_view = ProcessesViewMode::AgentSessions;
+        set_agent_snapshot(
+            &mut app,
+            vec![
+                agent_row("a", "alpha one"),
+                agent_row("b", "alpha two"),
+                agent_row("c", "beta"),
+                agent_row("d", "gamma"),
+                agent_row("e", "delta"),
+            ],
+        );
+        app.agents_panel_state.selected_index = 4;
+        app.global_filter.set_query("alpha");
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.agents_panel_state.selected_index, 1);
+    }
+
+    #[test]
+    fn test_kill_key_is_inert_in_agent_sessions_view() {
+        // 8.3節: エージェントセッションビューは読み取り専用。Kキーは何も実行しない。
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        push_procs(&mut app, 3); // 旧実装ならpending_actionが立つ状況を作る
+        set_agent_snapshot(&mut app, vec![agent_row("a", "t1"), agent_row("b", "t2")]);
+        app.processes_view = ProcessesViewMode::AgentSessions;
+
+        handle_key(&mut app, make_key(KeyCode::Char('K')));
+        assert!(
+            matches!(app.mode, AppMode::Normal),
+            "確認モードへ遷移しない"
+        );
+        assert!(app.pending_action.is_none(), "Actionを発行しない");
+    }
+
+    #[test]
+    fn test_kill_key_still_works_in_processes_view() {
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        push_procs(&mut app, 1);
+        app.processes_view = ProcessesViewMode::Processes;
+        handle_key(&mut app, make_key(KeyCode::Char('K')));
+        assert!(matches!(app.mode, AppMode::Confirm));
+        assert!(app.pending_action.is_some());
+    }
+
+    #[test]
+    fn test_view_switch_preserves_selection_roundtrip() {
+        // 10節: Processesビューで選択3行目→a→エージェントビューで選択1行目→aで戻ると3行目維持
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        push_procs(&mut app, 5);
+        set_agent_snapshot(
+            &mut app,
+            vec![
+                agent_row("a", "t1"),
+                agent_row("b", "t2"),
+                agent_row("c", "t3"),
+            ],
+        );
+        handle_key(&mut app, make_key(KeyCode::Char('j')));
+        handle_key(&mut app, make_key(KeyCode::Char('j')));
+        handle_key(&mut app, make_key(KeyCode::Char('j')));
+        assert_eq!(
+            app.panel_states[Panel::Processes as usize].selected_index,
+            3
+        );
+
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(app.agents_panel_state.selected_index, 0);
+        handle_key(&mut app, make_key(KeyCode::Char('j')));
+        assert_eq!(app.agents_panel_state.selected_index, 1);
+
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        assert_eq!(
+            app.panel_states[Panel::Processes as usize].selected_index,
+            3,
+            "process側の選択は維持される"
+        );
+        // ソートの独立も確認する（10節）
+        let proc_sort = app.process_sort;
+        handle_key(&mut app, make_key(KeyCode::Char('a')));
+        handle_key(&mut app, make_key(KeyCode::Char('.')));
+        assert_eq!(app.process_sort, proc_sort);
+        assert_eq!(
+            app.agents_panel_state.selected_index, 1,
+            "agent側の選択も維持される"
+        );
+    }
+
+    #[test]
+    fn test_draw_agent_view_shows_headers_and_rows() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(160, 48);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        app.processes_view = ProcessesViewMode::AgentSessions;
+        set_agent_snapshot(
+            &mut app,
+            vec![agent_row("a", "fix parser"), agent_row("b", "docs")],
+        );
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        for header in ["STATE", "AGENT", "TASK", "LOCATION", "WORKTREE", "QUIET"] {
+            assert!(text.contains(header), "header {header} missing:\n{text}");
+        }
+        assert!(text.contains("fix parser"), "row content missing");
+    }
+
+    #[test]
+    fn test_draw_agent_view_without_snapshot_no_panic() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Config::default());
+        app.active_panel = Panel::Processes;
+        app.processes_view = ProcessesViewMode::AgentSessions;
         terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 

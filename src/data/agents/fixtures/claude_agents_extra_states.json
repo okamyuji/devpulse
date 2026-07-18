@@ -1,0 +1,20 @@
+[
+  {
+    "id": "aaaa1111",
+    "cwd": "/Users/dev/devs/zenn",
+    "kind": "background",
+    "startedAt": 1783128114826,
+    "sessionId": "6c428b96-4d4f-47db-bd4a-adf7164f552f",
+    "name": "実行中タスクのサンプル",
+    "state": "running"
+  },
+  {
+    "id": "bbbb2222",
+    "cwd": "/Users/dev/devs/golang/primary-guard-ec-htmx-go",
+    "kind": "background",
+    "startedAt": 1783731709727,
+    "sessionId": "32d73388-d5eb-4629-98d6-9ac75e670612",
+    "name": "ci-rebuild-large-file-upload",
+    "state": "paused"
+  }
+]

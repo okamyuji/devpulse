@@ -11,6 +11,50 @@ pub struct Config {
     pub processes: ProcessesConfig,
     pub logs: LogsConfig,
     pub theme: ThemeConfig,
+    pub agents: AgentsConfig,
+}
+
+/// エージェントセッション観測の設定（詳細設計9節）。全キー省略可能。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// ビューとcollectorの有効化
+    pub enabled: bool,
+    /// 収集サイクルの間隔（ミリ秒）
+    pub refresh_ms: u64,
+    /// quiet表示の閾値秒
+    pub quiet_threshold_s: u64,
+    /// 外部コマンド1回あたりの上限時間（ミリ秒）
+    pub command_timeout_ms: u64,
+    /// 非公開保存形式のフォールバック。MVPではキーの予約のみで参照実装なし（詳細設計9節）
+    pub private_store_fallback: bool,
+}
+
+impl AgentsConfig {
+    /// 収集間隔の下限（ミリ秒）。これ未満はビジーループと即時stale判定を招く
+    pub const MIN_REFRESH_MS: u64 = 100;
+    /// 収集間隔の上限（ミリ秒）。鮮度判定が2周期分をi64ミリ秒へ変換するため、
+    /// 2倍してもi64に収まる値で抑える
+    pub const MAX_REFRESH_MS: u64 = (i64::MAX / 2) as u64;
+
+    /// 検証済みの収集間隔。収集ループと鮮度判定は必ずこの値を使う
+    /// （生のrefresh_msを直接使うと両者の判定基準が食い違う）
+    pub fn effective_refresh_ms(&self) -> u64 {
+        self.refresh_ms
+            .clamp(Self::MIN_REFRESH_MS, Self::MAX_REFRESH_MS)
+    }
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_ms: 5000,
+            quiet_threshold_s: crate::data::agents::DEFAULT_QUIET_THRESHOLD_S,
+            command_timeout_ms: crate::data::agents::DEFAULT_COMMAND_TIMEOUT_MS,
+            private_store_fallback: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -161,6 +205,31 @@ impl Config {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn effective_refresh_ms_clamps_zero_to_minimum() {
+        let cfg = AgentsConfig {
+            refresh_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_refresh_ms(), 100);
+    }
+
+    #[test]
+    fn effective_refresh_ms_keeps_default_value() {
+        assert_eq!(AgentsConfig::default().effective_refresh_ms(), 5000);
+    }
+
+    #[test]
+    fn effective_refresh_ms_caps_huge_value_below_i64_overflow() {
+        // 鮮度判定は2周期分をi64ミリ秒へ変換するため、2倍してもi64に収まる上限で抑える
+        let cfg = AgentsConfig {
+            refresh_ms: u64::MAX,
+            ..Default::default()
+        };
+        let eff = cfg.effective_refresh_ms();
+        assert!(eff.checked_mul(2).is_some_and(|v| v <= i64::MAX as u64));
+    }
 
     #[test]
     fn test_default_logs_config_has_docker_source() {

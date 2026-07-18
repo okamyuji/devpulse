@@ -131,6 +131,7 @@ mod tests {
             parent_pid: Some(1),
             listening_ports: vec![3000],
             start_time: 0,
+            cwd: None,
         }];
         let p = ProcessesPanel {
             processes: &procs,
@@ -159,6 +160,7 @@ mod tests {
                 parent_pid: Some(1),
                 listening_ports: vec![],
                 start_time: 0,
+                cwd: None,
             })
             .collect();
         let p = ProcessesPanel {

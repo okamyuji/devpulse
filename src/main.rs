@@ -36,6 +36,69 @@ pub struct Cli {
     /// Write sample config to ~/.config/devpulse/config.toml and exit
     #[arg(long)]
     pub init_config: bool,
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// サブコマンド（詳細設計7節）。未指定時は従来どおりTUIを起動する。
+#[derive(clap::Subcommand, Debug)]
+pub enum Command {
+    /// Collect agent sessions once and print JSON to stdout
+    Agents {
+        /// Emit JSON to stdout (the only output format)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// collectorのトップレベルJSON（詳細設計7節: schema_version / sessions / source_errors）。
+#[derive(serde::Serialize)]
+struct CollectorOutput {
+    schema_version: u32,
+    sessions: Vec<devpulse::data::agents::model::AgentSessionRow>,
+    source_errors: Vec<devpulse::data::agents::SourceError>,
+}
+
+/// `devpulse agents --json`: 収集を1回実行してJSONを標準出力へ出す（詳細設計7節）。
+/// 全取得元失敗も0で終える（観測できないこと自体は異常ではない）。
+async fn run_agents_collector(config: &Config) -> anyhow::Result<()> {
+    use devpulse::data::agents::{self, CollectOptions};
+
+    tracing::info!("agents collector run started");
+    let opts = CollectOptions {
+        command_timeout_ms: config.agents.command_timeout_ms,
+        quiet_threshold_s: config.agents.quiet_threshold_s,
+    };
+    let sources = agents::default_sources_with_owner(&opts, agents::cmux::CursorOwner::Cli);
+    let process_source = devpulse::data::processes::SysinfoProcessSource::new();
+    let tty_provider = agents::process::PsTtyProvider {
+        timeout_ms: opts.command_timeout_ms,
+    };
+    let mut git = agents::gitinfo::GitEnricher::new(
+        std::sync::Arc::new(agents::SystemCommandRunner),
+        opts.command_timeout_ms,
+    );
+    let snapshot = agents::collect_snapshot(
+        &sources,
+        &process_source,
+        &tty_provider,
+        &mut git,
+        &opts,
+        chrono::Utc::now(),
+    )
+    .await;
+    tracing::info!(
+        sessions = snapshot.sessions.len(),
+        source_errors = snapshot.source_errors.len(),
+        "agents collector run finished"
+    );
+    let output = CollectorOutput {
+        schema_version: 1,
+        sessions: snapshot.sessions,
+        source_errors: snapshot.source_errors,
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
 }
 
 /// Sample config embedded at compile time (available in both debug and release)
@@ -70,6 +133,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // ロギング初期化（ファイルのみ。TUIを壊さないようstdout/stderrへは出さない）。
+    // 失敗してもNoneが返るだけで起動は継続する。guardはmain終了時にフラッシュする。
+    let _log_guard = devpulse::logging::init();
+
     // Load config
     let config_path = cli.config.unwrap_or_else(|| {
         dirs::config_dir()
@@ -78,6 +145,17 @@ async fn main() -> anyhow::Result<()> {
             .join("config.toml")
     });
     let mut config = Config::load(&config_path)?;
+
+    // agentsサブコマンド: 収集を1回実行しJSONを出して終了（TUIは起動しない）。
+    // 契約は`devpulse agents --json`（詳細設計7節）。フラグ無しは誤用として
+    // stdoutを汚さず非0で終了する。
+    if let Some(Command::Agents { json }) = cli.command {
+        if !json {
+            eprintln!("error: `devpulse agents` requires --json (JSON is the only output format)");
+            std::process::exit(2);
+        }
+        return run_agents_collector(&config).await;
+    }
 
     // Apply CLI overrides
     if let Some(refresh) = cli.refresh {
@@ -115,6 +193,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Start background log collection
     app.start_log_collection();
+
+    // Start background agent-sessions collection (詳細設計8.4節。enabled=false時は起動しない)
+    app.start_agent_collection();
 
     // Initial data fetch
     app.tick();
@@ -157,6 +238,12 @@ async fn main() -> anyhow::Result<()> {
 
         // Drain log entries from background collectors
         app.drain_logs();
+
+        // Drain agent-sessions snapshots from the background collector
+        app.drain_agents();
+
+        // 鮮度の遷移（stalled/回復）を検知してログに残す（遷移時のみ出力）
+        app.update_agents_freshness(chrono::Utc::now());
 
         // Tick
         if last_tick.elapsed() >= tick_rate {

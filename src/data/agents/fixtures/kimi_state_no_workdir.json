@@ -1,0 +1,15 @@
+{
+ "createdAt": "2026-06-08T06:06:25.576Z",
+ "updatedAt": "2026-06-08T06:06:57.994Z",
+ "title": "kimiコマンドの動作確認をお願いします🚀",
+ "isCustomTitle": false,
+ "agents": {
+  "main": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_e5c8ea999ba9/session_03e14dbb-9618-4996-b2ef-461c3926da81/agents/main",
+   "type": "main",
+   "parentAgentId": null
+  }
+ },
+ "custom": {},
+ "lastPrompt": "kimiコマンドの動作確認をお願いします🚀"
+}

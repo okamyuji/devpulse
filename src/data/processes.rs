@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
@@ -12,11 +13,102 @@ pub struct ProcessInfo {
     pub parent_pid: Option<u32>,
     pub listening_ports: Vec<u16>,
     pub start_time: u64,
+    /// プロセスのカレントディレクトリ（sysinfoから取得。取得不能時はNone）
+    pub cwd: Option<PathBuf>,
 }
 
 pub trait ProcessSource: Send + Sync {
     fn list_processes(&self) -> Result<Vec<ProcessInfo>>;
     fn kill_process(&self, pid: u32, force: bool) -> Result<()>;
+}
+
+/// sysinfoによるProcessSource実装。エージェント収集（collectorと背景タスク）が使う。
+/// System状態を保持して再走査するためCPU差分が計算される。読み取り専用でkillは非対応。
+/// user/threads/portsは収集対象外のため空値（app.rs tick()と同じ規則）。
+pub struct SysinfoProcessSource {
+    sys: std::sync::Mutex<sysinfo::System>,
+}
+
+impl SysinfoProcessSource {
+    pub fn new() -> Self {
+        Self {
+            sys: std::sync::Mutex::new(sysinfo::System::new()),
+        }
+    }
+}
+
+impl Default for SysinfoProcessSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProcessSource for SysinfoProcessSource {
+    fn list_processes(&self) -> Result<Vec<ProcessInfo>> {
+        let mut sys = self
+            .sys
+            .lock()
+            .map_err(|_| anyhow::anyhow!("sysinfo lock poisoned"))?;
+        // refresh_processesの既定ではcwdが更新されないため明示的に要求する
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::everything().with_cwd(sysinfo::UpdateKind::Always),
+        );
+        Ok(sys
+            .processes()
+            .values()
+            .map(|p| ProcessInfo {
+                pid: p.pid().as_u32(),
+                name: p.name().to_string_lossy().to_string(),
+                command: p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                user: String::new(),
+                cpu_percent: p.cpu_usage(),
+                memory_bytes: p.memory(),
+                threads: 0,
+                parent_pid: p.parent().map(|pp| pp.as_u32()),
+                listening_ports: Vec::new(),
+                start_time: p.start_time(),
+                cwd: p.cwd().map(|c| c.to_path_buf()),
+            })
+            .collect())
+    }
+
+    fn kill_process(&self, _pid: u32, _force: bool) -> Result<()> {
+        anyhow::bail!("kill is not supported by the agents collector")
+    }
+}
+
+#[cfg(test)]
+mod sysinfo_source_tests {
+    use super::*;
+
+    // 回帰: プロセス行のcwdが全件Noneでworktree競合検出が機能しなかった
+    // (2026-07-18 手動検証で発見)。自プロセスのcwdは必ず取得できること。
+    #[test]
+    fn regression_sysinfo_source_fills_cwd_for_own_process() {
+        let src = SysinfoProcessSource::new();
+        let procs = src.list_processes().expect("list_processes");
+        let me = std::process::id();
+        let row = procs
+            .into_iter()
+            .find(|p| p.pid == me)
+            .expect("own process should be listed");
+        assert!(
+            row.cwd.is_some(),
+            "cwd must be populated for own process, got None"
+        );
+        assert_eq!(
+            row.cwd.unwrap(),
+            std::env::current_dir().expect("current_dir"),
+            "cwd must equal the actual current directory"
+        );
+    }
 }
 
 const DEV_PROCESSES: &[&str] = &[
@@ -58,9 +150,11 @@ mod tests {
             parent_pid: Some(1),
             listening_ports: vec![3000, 3001],
             start_time: 1700000000,
+            cwd: Some(PathBuf::from("/Users/dev/app")),
         };
         assert_eq!(proc.pid, 1234);
         assert_eq!(proc.listening_ports.len(), 2);
+        assert_eq!(proc.cwd, Some(PathBuf::from("/Users/dev/app")));
     }
 
     #[test]

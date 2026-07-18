@@ -1,0 +1,50 @@
+{
+ "createdAt": "2026-06-21T01:39:37.465Z",
+ "updatedAt": "2026-06-21T01:39:41.513Z",
+ "title": "2ファイルを読んでTask 1から15まで実装してください",
+ "isCustomTitle": false,
+ "agents": {
+  "main": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/main",
+   "type": "main",
+   "parentAgentId": null
+  },
+  "agent-0": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-0",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-1": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-1",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-2": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-2",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-3": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-3",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-4": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-4",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-5": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-5",
+   "type": "sub",
+   "parentAgentId": "main"
+  },
+  "agent-6": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_kizami_68bff1530e0e/session_ac3c0715-da52-440d-af20-bdf47d4c2ae9/agents/agent-6",
+   "type": "sub",
+   "parentAgentId": "main"
+  }
+ },
+ "custom": {},
+ "lastPrompt": "2ファイルを読んでTask 1から15まで実装してください"
+}
