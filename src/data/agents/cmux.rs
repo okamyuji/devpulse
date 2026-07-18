@@ -126,6 +126,14 @@ pub(crate) fn cleanup_stale_cursor_files(dir: &std::path::Path) {
     }
 }
 
+/// 自インスタンスのカーソルを起動時に必ずseq 0へ初期化する。
+/// PIDはOSに再利用され得るため、再利用PIDの新プロセスが前インスタンスの
+/// カーソルを引き継ぐと、前インスタンス終了後のイベントを見落とす。
+/// 新規インスタンスは常にseq 0からの全再生で開始する（欠如時シードと同じ意味論）。
+pub(crate) fn claim_own_cursor(path: &std::path::Path) {
+    seed_cursor(path);
+}
+
 /// カーソルファイルへseq 0を書き込む（親ディレクトリも作る）。失敗しても落とさない
 /// （cmuxはファイル欠如時ライブ購読になり、イベント0件として正直に縮退する）。
 fn seed_cursor(path: &std::path::Path) {
@@ -349,6 +357,19 @@ mod tests {
     const TREE_FIXTURE: &str = include_str!("fixtures/cmux_tree.json");
     const EVENTS_FIXTURE: &str = include_str!("fixtures/cmux_events.jsonl");
     const EVENTS_TRUNCATED_FIXTURE: &str = include_str!("fixtures/cmux_events_truncated.jsonl");
+
+    #[test]
+    fn claim_own_cursor_resets_inherited_stale_cursor_to_zero() {
+        // PID再利用で前インスタンスのカーソルを引き継いだ場合でも、
+        // 起動時のclaimでseq 0へ戻り、前インスタンス終了後のイベントを
+        // 見落とさないこと。
+        let path = test_cursor_path("claim-reseed");
+        std::fs::write(&path, "12345\n").expect("write stale cursor");
+        claim_own_cursor(&path);
+        let content = std::fs::read_to_string(&path).expect("read cursor");
+        assert_eq!(content, "0\n", "inherited cursor must be reseeded to zero");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn default_cursor_path_is_distinct_per_consumer_owner_and_process() {

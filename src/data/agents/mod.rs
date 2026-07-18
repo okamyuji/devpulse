@@ -334,6 +334,8 @@ pub fn default_sources_with_owner(
     if let Some(dir) = cursor_path.parent() {
         cmux::cleanup_stale_cursor_files(dir);
     }
+    // PID再利用で前インスタンスのカーソルを引き継がないよう、自カーソルは必ず初期化する
+    cmux::claim_own_cursor(&cursor_path);
     vec![
         Box::new(cmux::CmuxAdapter::new(
             std::sync::Arc::new(SystemCommandRunner),
