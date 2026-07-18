@@ -1,0 +1,15 @@
+{
+ "createdAt": "2026-07-16T23:22:22.509Z",
+ "updatedAt": "2026-07-16T23:22:22.509Z",
+ "title": "New Session",
+ "isCustomTitle": false,
+ "agents": {
+  "main": {
+   "homedir": "/Users/dev/.kimi-code/sessions/wd_big_tree_table_21873dbf0eb7/session_08280add-d6c2-4c74-9f72-2606c27a229c/agents/main",
+   "type": "main",
+   "parentAgentId": null
+  }
+ },
+ "custom": {},
+ "workDir": "/Users/dev/devs/ruby/big_tree_table"
+}

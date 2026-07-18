@@ -1,0 +1,29 @@
+[
+  {
+    "id": "311b1c16",
+    "cwd": "/Users/dev",
+    "kind": "background",
+    "startedAt": 1784329656386,
+    "sessionId": "311b1c16-943f-44de-a966-8e7452fbf52f",
+    "name": "CLI 出力のベンチマーク測定",
+    "state": "blocked"
+  },
+  {
+    "pid": "81574",
+    "cwd": "/Users/dev/devs/rust/devpulse",
+    "kind": "interactive",
+    "startedAt": 1784377337359,
+    "sessionId": "e05d60a0-a0cb-44db-9206-6c6e5bf04d4c",
+    "name": "devpulse-0a",
+    "status": "idle"
+  },
+  {
+    "pid": 52295,
+    "cwd": "/Users/dev",
+    "kind": "interactive",
+    "startedAt": 1784378863145,
+    "sessionId": "02a95d32-56fb-46ad-a757-108211b7ea6f",
+    "name": "home-e2",
+    "status": "idle"
+  }
+]

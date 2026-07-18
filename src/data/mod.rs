@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod docker;
 pub mod docker_connector;
 pub mod log_collector;

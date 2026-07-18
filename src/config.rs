@@ -11,6 +11,35 @@ pub struct Config {
     pub processes: ProcessesConfig,
     pub logs: LogsConfig,
     pub theme: ThemeConfig,
+    pub agents: AgentsConfig,
+}
+
+/// エージェントセッション観測の設定（詳細設計9節）。全キー省略可能。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// ビューとcollectorの有効化
+    pub enabled: bool,
+    /// 収集サイクルの間隔（ミリ秒）
+    pub refresh_ms: u64,
+    /// quiet表示の閾値秒
+    pub quiet_threshold_s: u64,
+    /// 外部コマンド1回あたりの上限時間（ミリ秒）
+    pub command_timeout_ms: u64,
+    /// 非公開保存形式のフォールバック。MVPではキーの予約のみで参照実装なし（詳細設計9節）
+    pub private_store_fallback: bool,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            refresh_ms: 5000,
+            quiet_threshold_s: crate::data::agents::DEFAULT_QUIET_THRESHOLD_S,
+            command_timeout_ms: crate::data::agents::DEFAULT_COMMAND_TIMEOUT_MS,
+            private_store_fallback: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

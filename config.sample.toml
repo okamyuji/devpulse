@@ -46,3 +46,11 @@ containers = "all"             # "all" | カンマ区切りのコンテナID/名
 
 [theme]
 name = "dark"                  # "dark" | "light"
+
+# --- エージェントセッション観測 ---
+[agents]
+enabled = true                 # ビューとcollector (devpulse agents --json) の有効化
+refresh_ms = 5000              # 収集サイクルの間隔 (ms)
+quiet_threshold_s = 480        # quiet表示の閾値秒
+command_timeout_ms = 1000      # 外部コマンド1回あたりの上限時間 (ms)
+private_store_fallback = false # 非公開保存形式フォールバック (キー予約のみ、MVP未実装)
