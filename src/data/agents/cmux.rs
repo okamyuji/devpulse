@@ -71,16 +71,59 @@ impl CursorOwner {
     }
 }
 
-/// events取得カーソルファイルの所有者別既定パス
-/// （~/.local/share/devpulse/cmux-events-cursor-{tui,cli}）。
-/// 旧ファイル（接尾辞なしcmux-events-cursor）は参照せず放置してよい。
+/// events取得カーソルファイルのインスタンス別既定パス
+/// （~/.local/share/devpulse/cmux-events-cursor-{tui,cli}-{pid}）。
+/// 所有者だけでなく自プロセスPIDも含めるのは、同一モードのDevPulse多重起動が
+/// 同じカーソルを進めると先に読んだ側がイベントを消費してしまうため。
 /// 新パスは欠如時にseq 0からシードされる既存の初回動作で追いつく。
 pub fn default_cursor_path(owner: CursorOwner) -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default()
         .join(".local/share/devpulse")
-        .join(format!("cmux-events-cursor-{}", owner.suffix()))
+        .join(format!(
+            "cmux-events-cursor-{}-{}",
+            owner.suffix(),
+            std::process::id()
+        ))
+}
+
+/// 残骸カーソルファイルを掃除する（best effort、失敗しても落とさない）。
+/// PID入りカーソルはプロセス終了後に残るため、生きていないPIDのファイルと
+/// 旧命名（固定名・所有者のみ）のファイルを削除する。自PIDと稼働中PIDは残す。
+pub(crate) fn cleanup_stale_cursor_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing(),
+    );
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name.strip_prefix("cmux-events-cursor") else {
+            continue;
+        };
+        let stale = match rest
+            .strip_prefix("-tui-")
+            .or_else(|| rest.strip_prefix("-cli-"))
+        {
+            // PID入り: 自プロセス以外で、そのPIDが生きていなければ残骸
+            Some(pid_str) => match pid_str.parse::<u32>() {
+                Ok(pid) if pid == std::process::id() => false,
+                Ok(pid) => sys.process(sysinfo::Pid::from_u32(pid)).is_none(),
+                Err(_) => false,
+            },
+            // 旧命名（"", "-tui", "-cli"）は現行コードが参照しないため残骸
+            None => matches!(rest, "" | "-tui" | "-cli"),
+        };
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// カーソルファイルへseq 0を書き込む（親ディレクトリも作る）。失敗しても落とさない
@@ -308,22 +351,54 @@ mod tests {
     const EVENTS_TRUNCATED_FIXTURE: &str = include_str!("fixtures/cmux_events_truncated.jsonl");
 
     #[test]
-    fn default_cursor_path_is_distinct_per_consumer_owner() {
-        // TUI常駐collectorと一発CLIが同じカーソルを進めると互いのイベントを
-        // 食い合うため、消費者ごとにカーソルファイルを分ける。
+    fn default_cursor_path_is_distinct_per_consumer_owner_and_process() {
+        // 消費者間（TUIとCLI）だけでなく、同一モードのDevPulse多重起動でも
+        // カーソルを共有すると先に読んだ側がイベントを消費してしまうため、
+        // カーソルパスは所有者と自プロセスPIDの両方で一意にする。
+        let pid = std::process::id();
         let tui = default_cursor_path(CursorOwner::Tui);
         let cli = default_cursor_path(CursorOwner::Cli);
         assert_ne!(tui, cli);
         assert!(
-            tui.to_string_lossy().ends_with("cmux-events-cursor-tui"),
+            tui.to_string_lossy()
+                .ends_with(&format!("cmux-events-cursor-tui-{pid}")),
             "got: {}",
             tui.display()
         );
         assert!(
-            cli.to_string_lossy().ends_with("cmux-events-cursor-cli"),
+            cli.to_string_lossy()
+                .ends_with(&format!("cmux-events-cursor-cli-{pid}")),
             "got: {}",
             cli.display()
         );
+    }
+
+    #[test]
+    fn cleanup_removes_dead_pid_and_legacy_cursor_files_only() {
+        // PID入りカーソルはプロセス終了で残骸になるため、生きていないPIDの
+        // ファイルと旧固定名ファイルだけを掃除し、稼働中のものと無関係な
+        // ファイルは残す。
+        let dir = std::env::temp_dir().join(format!("devpulse-cursor-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let own = dir.join(format!("cmux-events-cursor-tui-{}", std::process::id()));
+        let dead = dir.join("cmux-events-cursor-cli-999999999");
+        let legacy = dir.join("cmux-events-cursor");
+        let legacy_tui = dir.join("cmux-events-cursor-tui");
+        let unrelated = dir.join("devpulse.log");
+        for p in [&own, &dead, &legacy, &legacy_tui, &unrelated] {
+            std::fs::write(p, "0\n").expect("seed test file");
+        }
+        cleanup_stale_cursor_files(&dir);
+        assert!(own.exists(), "own live cursor must survive");
+        assert!(unrelated.exists(), "unrelated file must survive");
+        assert!(!dead.exists(), "dead-pid cursor must be removed");
+        assert!(!legacy.exists(), "legacy fixed-name cursor must be removed");
+        assert!(
+            !legacy_tui.exists(),
+            "legacy owner-only cursor must be removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

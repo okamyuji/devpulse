@@ -322,17 +322,23 @@ pub async fn collect_snapshot(
 }
 
 /// 実環境向けの既定アダプタ一式を、cmux eventsカーソルの所有者を明示して組み立てる。
-/// カーソルは所有者ごとに別ファイルになるため、TUI常駐と一発CLIが互いのイベントを消費しない。
+/// カーソルは所有者と自プロセスPIDごとに別ファイルになるため、TUI常駐・一発CLI・
+/// DevPulse多重起動のどの組み合わせでも互いのイベントを消費しない。
 pub fn default_sources_with_owner(
     opts: &CollectOptions,
     owner: cmux::CursorOwner,
 ) -> Vec<Box<dyn AgentSource>> {
     let timeout = opts.command_timeout_ms;
+    let cursor_path = cmux::default_cursor_path(owner);
+    // PID入りカーソルはプロセス終了で残骸になるため、組み立て時に掃除する
+    if let Some(dir) = cursor_path.parent() {
+        cmux::cleanup_stale_cursor_files(dir);
+    }
     vec![
         Box::new(cmux::CmuxAdapter::new(
             std::sync::Arc::new(SystemCommandRunner),
             timeout,
-            cmux::default_cursor_path(owner),
+            cursor_path,
         )),
         Box::new(claude::ClaudeAdapter::new(
             std::sync::Arc::new(SystemCommandRunner),
