@@ -51,7 +51,7 @@ fn bench_tick_overhead() {
 fn bench_memory_usage() {
     use sysinfo::{Pid, System};
 
-    let mut sys = System::new();
+    let mut sys = System::new().expect("sysinfo supports this OS");
     let my_pid = Pid::from_u32(std::process::id());
 
     // Measure before App creation
