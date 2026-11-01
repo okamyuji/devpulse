@@ -1,2 +1,4 @@
 [toolchain]
-channel = "stable"
+# 版を固定し、新しい版は Dependabot（rust-toolchain）の PR で CI を通してから上げる
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
