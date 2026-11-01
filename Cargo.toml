@@ -9,8 +9,8 @@ license = "MIT"
 ratatui = "0.30"
 crossterm = "0.29"
 tokio = { version = "1", features = ["full"] }
-bollard = "0.20"
-sysinfo = "0.38"
+bollard = "0.21"
+sysinfo = "0.40"
 notify = "8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,7 +19,7 @@ toml = "1.1.2"
 anyhow = "1"
 thiserror = "2"
 arboard = "3"
-dirs = "6"
+dirs = "7"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
