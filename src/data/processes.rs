@@ -26,13 +26,13 @@ pub trait ProcessSource: Send + Sync {
 /// System状態を保持して再走査するためCPU差分が計算される。読み取り専用でkillは非対応。
 /// user/threads/portsは収集対象外のため空値（app.rs tick()と同じ規則）。
 pub struct SysinfoProcessSource {
-    sys: std::sync::Mutex<sysinfo::System>,
+    sys: std::sync::Mutex<Option<sysinfo::System>>,
 }
 
 impl SysinfoProcessSource {
     pub fn new() -> Self {
         Self {
-            sys: std::sync::Mutex::new(sysinfo::System::new()),
+            sys: std::sync::Mutex::new(sysinfo::System::new().ok()),
         }
     }
 }
@@ -45,10 +45,14 @@ impl Default for SysinfoProcessSource {
 
 impl ProcessSource for SysinfoProcessSource {
     fn list_processes(&self) -> Result<Vec<ProcessInfo>> {
-        let mut sys = self
+        let mut guard = self
             .sys
             .lock()
             .map_err(|_| anyhow::anyhow!("sysinfo lock poisoned"))?;
+        // sysinfo 0.40はOSが未対応だとSystem::newが失敗する。
+        let sys = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("sysinfo is not supported on this OS"))?;
         // refresh_processesの既定ではcwdが更新されないため明示的に要求する
         sys.refresh_processes_specifics(
             sysinfo::ProcessesToUpdate::All,

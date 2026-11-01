@@ -95,7 +95,10 @@ pub(crate) fn cleanup_stale_cursor_files(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut sys = sysinfo::System::new();
+    // PIDの生死を調べられないときは、稼働中のファイルを消さないよう何もしない。
+    let Ok(mut sys) = sysinfo::System::new() else {
+        return;
+    };
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,

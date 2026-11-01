@@ -317,7 +317,8 @@ pub struct App {
     // Log collection receiver
     log_rx: Option<mpsc::Receiver<LogEntry>>,
     // Internal data sources
-    sys: sysinfo::System,
+    // sysinfo 0.40はOSが未対応だとSystem::newが失敗する。その場合はNoneにしてプロセス一覧を空にする。
+    sys: Option<sysinfo::System>,
     #[cfg(not(test))]
     docker_source: BollardDockerSource,
 }
@@ -395,7 +396,7 @@ impl App {
             agents_stalled: false,
             agents_rx: None,
             log_rx: None,
-            sys: sysinfo::System::new(),
+            sys: sysinfo::System::new().ok(),
             #[cfg(not(test))]
             docker_source,
         }
@@ -661,35 +662,37 @@ impl App {
         }
 
         // Scan processes via sysinfo (reuse self.sys so CPU deltas are computed)
-        self.sys
-            .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let processes: Vec<ProcessInfo> = self
-            .sys
-            .processes()
-            .values()
-            .map(|p| {
-                let name = p.name().to_string_lossy().to_string();
-                let cmd_parts: Vec<String> = p
-                    .cmd()
-                    .iter()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .collect();
-                let command = cmd_parts.join(" ");
-                ProcessInfo {
-                    pid: p.pid().as_u32(),
-                    name,
-                    command,
-                    user: String::new(),
-                    cpu_percent: p.cpu_usage(),
-                    memory_bytes: p.memory(),
-                    threads: 0,
-                    parent_pid: p.parent().map(|pp| pp.as_u32()),
-                    listening_ports: Vec::new(),
-                    start_time: p.start_time(),
-                    cwd: p.cwd().map(|c| c.to_path_buf()),
-                }
-            })
-            .collect();
+        let processes: Vec<ProcessInfo> = match self.sys.as_mut() {
+            Some(sys) => {
+                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                sys.processes()
+                    .values()
+                    .map(|p| {
+                        let name = p.name().to_string_lossy().to_string();
+                        let cmd_parts: Vec<String> = p
+                            .cmd()
+                            .iter()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .collect();
+                        let command = cmd_parts.join(" ");
+                        ProcessInfo {
+                            pid: p.pid().as_u32(),
+                            name,
+                            command,
+                            user: String::new(),
+                            cpu_percent: p.cpu_usage(),
+                            memory_bytes: p.memory(),
+                            threads: 0,
+                            parent_pid: p.parent().map(|pp| pp.as_u32()),
+                            listening_ports: Vec::new(),
+                            start_time: p.start_time(),
+                            cwd: p.cwd().map(|c| c.to_path_buf()),
+                        }
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
 
         self.process_list = processes;
 
