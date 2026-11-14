@@ -563,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn collect_cycle_completion_emits_info_event() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let sources: Vec<Box<dyn AgentSource>> = vec![Box::new(MockAgentSource {
             source_name: "claude",
             available: true,
@@ -587,7 +587,7 @@ mod tests {
     #[tokio::test]
     async fn failed_source_emits_warn_event_with_reason() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let sources: Vec<Box<dyn AgentSource>> = vec![Box::new(MockAgentSource {
             source_name: "cmux",
             available: true,
@@ -626,7 +626,7 @@ mod tests {
             }
         }
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let sources: Vec<Box<dyn AgentSource>> = vec![Box::new(FailingActivitySource)];
         let snapshot = run_pipeline(sources, vec![], Ok(HashMap::new())).await;
         let err = snapshot
