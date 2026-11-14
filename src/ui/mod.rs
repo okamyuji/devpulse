@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn disabled_action_key_in_agent_view_emits_info_event() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let mut app = App::new(Config::default());
         app.active_panel = Panel::Processes;
         app.toggle_processes_view();

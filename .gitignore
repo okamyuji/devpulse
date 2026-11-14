@@ -1,3 +1,5 @@
 target/
 /mutants.out
 /mutants.out.old
+.DS_Store
+.serena/

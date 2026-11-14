@@ -171,7 +171,7 @@ mod tests {
         // status（stateではない）を持つ。旧実装はidなしとしてスキップし、生きている
         // 対話セッションが全て欠落し、warnが毎周期出続けた（実測288回）。
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let rows = parse_claude_agents(MIXED_INTERACTIVE_FIXTURE).unwrap();
         assert_eq!(rows.len(), 3);
         // 実在する2スキーマ（background型・interactive型）はどちらもwarnを出さない
@@ -208,7 +208,7 @@ mod tests {
     fn warns_only_when_both_id_and_session_id_are_missing() {
         // warnの整理: idもsessionIdも無いエントリのみwarnして読み飛ばす
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let json = r#"[
           {"cwd": "/tmp", "state": "done", "name": "no id no sessionId"},
           {"sessionId": "aabbccdd-0000-1111-2222-333344445555", "cwd": "/tmp", "status": "idle"}

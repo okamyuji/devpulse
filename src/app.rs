@@ -1312,7 +1312,7 @@ mod agents_view_tests {
     #[test]
     fn toggle_processes_view_emits_info_event_with_view_name() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let mut app = test_app();
         app.toggle_processes_view();
         let ev = cap
@@ -1328,7 +1328,7 @@ mod agents_view_tests {
     #[test]
     fn stalled_transition_emits_warn_once_and_recovery_info_once() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let mut app = test_app();
         let now = Utc::now();
         // 収集時刻が十分古いスナップショット → stalled

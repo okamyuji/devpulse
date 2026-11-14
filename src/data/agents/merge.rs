@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn merge_emits_debug_event_with_match_counts() {
         let cap = crate::logging::capture::Capture::new();
-        let _guard = tracing::subscriber::set_default(cap.subscriber());
+        let _guard = cap.set_default();
         let cmux = vec![cmux_row("surface:1", "ttys000", "t")];
         let procs = vec![
             proc_row(1, AgentKind::Claude, Some("/x"), Some("ttys000")),

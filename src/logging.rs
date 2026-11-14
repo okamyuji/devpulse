@@ -56,7 +56,7 @@ fn restrict_permissions(path: &Path, mode: u32) {
 }
 
 /// テスト専用のイベント収集レイヤー（外部crate不使用の最小実装）。
-/// `tracing::subscriber::set_default` / `with_default` と組み合わせて使う。
+/// `Capture::set_default` で既定subscriberにして使う。
 #[cfg(test)]
 pub mod capture {
     use std::fmt::Write as _;
@@ -91,6 +91,16 @@ pub mod capture {
             Registry::default().with(CaptureLayer {
                 events: Arc::clone(&self.events),
             })
+        }
+
+        /// このスレッドの既定subscriberにし、callsiteのInterestを再計算する。
+        pub fn set_default(&self) -> tracing::subscriber::DefaultGuard {
+            let guard = tracing::subscriber::set_default(self.subscriber());
+            // 最初のset_default前に別スレッドで登録されたcallsiteは、
+            // tracing-coreのJustOne経路でNoSubscriberのneverを後から書き込み得る。
+            // 再計算しないと、並行テストでこのCaptureがイベントを取り逃す。
+            tracing::callsite::rebuild_interest_cache();
+            guard
         }
 
         pub fn events(&self) -> Vec<CapturedEvent> {
